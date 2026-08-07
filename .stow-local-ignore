@@ -1,0 +1,8 @@
+\.DS_Store
+\.git
+\.gitignore
+\.gitmodules
+^/\.github
+^/AGENTS\.md
+^/LICENSE.*
+^/README.*
