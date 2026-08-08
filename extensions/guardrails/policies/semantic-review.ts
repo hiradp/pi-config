@@ -16,6 +16,67 @@ export function matchesReviewCommand(command: string, pattern: string): boolean 
   });
 }
 
+function hasDynamicShellSyntax(command: string): boolean {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+
+  for (const character of command) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      continue;
+    }
+    if (character === "'" && quote === undefined) {
+      quote = "'";
+      continue;
+    }
+    if (character === '"') {
+      quote = quote === '"' ? undefined : '"';
+      continue;
+    }
+    if (character === "$" || character === "`") return true;
+    if (!quote && "{}*?[]()~".includes(character)) return true;
+  }
+
+  return false;
+}
+
+export function isAutoAllowedGhPrViewCommand(command: string): boolean {
+  const segments = parseShellSegments(command);
+  if (segments.length !== 1) return false;
+
+  const segment = segments[0];
+  if (
+    segment.redirectTargets.length > 0 ||
+    basename(segment.words[0] ?? "") !== "gh" ||
+    /&/.test(segment.text) ||
+    hasDynamicShellSyntax(segment.text)
+  ) {
+    return false;
+  }
+
+  const invocation = shellSegmentInvocation(segment);
+  if (
+    !invocation ||
+    invocation.command !== "gh" ||
+    invocation.args[0] !== "pr" ||
+    invocation.args[1] !== "view"
+  ) {
+    return false;
+  }
+
+  return !invocation.args
+    .slice(2)
+    .some((argument) => argument.startsWith("--web") || /^-[^-]*w/.test(argument));
+}
+
 export const semanticReviewPolicy = {
   name: "semantic-review",
   async guidance({ config }) {
@@ -38,6 +99,7 @@ export const semanticReviewPolicy = {
     const pattern = config.semanticReview.commands.find((candidate) =>
       matchesReviewCommand(action.input.command as string, candidate),
     );
-    if (pattern) return review(`Command matched semantic review rule '${pattern}'.`);
+    if (!pattern || isAutoAllowedGhPrViewCommand(action.input.command)) return;
+    return review(`Command matched semantic review rule '${pattern}'.`);
   },
 } satisfies GuardrailPolicy;

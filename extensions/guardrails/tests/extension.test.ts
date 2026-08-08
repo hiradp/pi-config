@@ -270,10 +270,19 @@ describe("guardrail extension", { concurrency: false }, () => {
       { classifier },
     );
 
+    const readOnly = await emit(
+      runtime,
+      "tool_call",
+      { toolName: "bash", input: { command: "gh pr view 42 --json title,url" } },
+      ctx,
+    );
+    assert.equal(readOnly, undefined);
+    assert.equal(calls, 0);
+
     const allowed = await emit(
       runtime,
       "tool_call",
-      { toolName: "bash", input: { command: "gh pr view 42" } },
+      { toolName: "bash", input: { command: "gh pr merge 42" } },
       ctx,
     );
     assert.equal(allowed, undefined);

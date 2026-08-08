@@ -13,7 +13,11 @@ import {
 import { matchesPathPattern, resolvePathForPolicy, shellMutationTargets } from "../path-policy.ts";
 import { pathsPolicy } from "../policies/paths.ts";
 import { selfProtectionPolicy } from "../policies/self-protection.ts";
-import { matchesReviewCommand, semanticReviewPolicy } from "../policies/semantic-review.ts";
+import {
+  isAutoAllowedGhPrViewCommand,
+  matchesReviewCommand,
+  semanticReviewPolicy,
+} from "../policies/semantic-review.ts";
 import { isRootHomeOrSystemPath, systemSafetyPolicy } from "../policies/system-safety.ts";
 import type { GuardrailAction, GuardrailPolicy } from "../policy.ts";
 
@@ -209,6 +213,47 @@ describe("semantic review selection", () => {
     assert.equal(matchesReviewCommand("sudo -u root git push origin main", "git push"), true);
     assert.equal(matchesReviewCommand("echo git push", "git push"), false);
     assert.equal(matchesReviewCommand("git status", "git push"), false);
+  });
+
+  test("auto-allows only standalone gh pr view commands", async () => {
+    for (const command of [
+      "gh pr view 42",
+      "gh pr view https://github.com/example/repo/pull/42 --json title,body --comments",
+      "gh pr view 42 --json files --jq '.files[] | .path'",
+      "gh pr view 42 --template '{{.title}}'",
+      "gh pr view '$GH_VIEW_ARGS'",
+      "gh pr view --help",
+    ]) {
+      assert.equal(isAutoAllowedGhPrViewCommand(command), true);
+      assert.equal(
+        await check(semanticReviewPolicy, bash(command), { config: semanticConfig }),
+        undefined,
+      );
+    }
+
+    for (const command of [
+      "gh pr view 42 --web",
+      "gh pr view 42 -w",
+      "gh pr view 42 && gh pr edit 42 --title changed",
+      "gh pr view 42 > report.txt",
+      'gh pr view "$(gh pr edit 42 --title changed)"',
+      'gh pr view 42 "x\'$(gh pr edit 42 --title changed)"',
+      'gh pr view 42 "x\'`gh pr edit 42 --title changed`"',
+      'gh pr view 42 "$GH_VIEW_ARGS"',
+      "gh pr view 42 --${WEB_SUFFIX}",
+      "gh pr view 42 --{web,json}",
+      "gh pr view 42 --w*",
+      "gh pr view ~",
+      "gh pr view ~other/repo",
+      "env gh pr view 42",
+      "gh pr diff 42",
+    ]) {
+      assert.equal(isAutoAllowedGhPrViewCommand(command), false);
+      assert.equal(
+        (await check(semanticReviewPolicy, bash(command), { config: semanticConfig }))?.outcome,
+        "review",
+      );
+    }
   });
 
   test("requests review only for configured agent actions", async () => {

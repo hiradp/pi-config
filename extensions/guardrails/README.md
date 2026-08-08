@@ -44,6 +44,8 @@ Modes:
 - `shadow` — records and displays the classifier suggestion, then still asks the user;
 - `enforce` — applies `allow`, `confirm`, or `block` from the classifier.
 
+A standalone `gh pr view` agent command with literal arguments skips semantic classification because it is deterministically read-only. Commands using `--web`, wrappers, redirects, shell composition or expansion, or another `gh` operation remain subject to review. Other deterministic policies still evaluate every command. As with all name-based command policies, this assumes `gh` resolves to the genuine GitHub CLI; use a controlled `PATH` or sandbox when the execution environment is not trusted.
+
 Classifier errors, missing credentials, invalid responses, and timeouts fall back to user confirmation. Without an interactive UI, confirmation fails closed. Direct user shell commands remain subject to deterministic policies but skip semantic classification because the user already expressed the action directly.
 
 The configured model is used when `model` is set to `provider/model`; otherwise the active Pi model is used with low reasoning effort. `/guardrails reviews` shows recent sanitized results.
