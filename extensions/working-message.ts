@@ -1,8 +1,8 @@
 /**
  * Working Message - shows a random phrase and elapsed time in Pi's working row.
  *
- * One phrase is selected per request and remains stable while a themed shimmer
- * moves across it. Elapsed time runs from before_agent_start until agent_settled.
+ * The phrase rotates every 20 seconds while a themed shimmer moves across it.
+ * Elapsed time runs from before_agent_start until agent_settled.
  */
 
 import { performance } from "node:perf_hooks";
@@ -10,6 +10,7 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 
 const SHIMMER_INTERVAL_MS = 100;
 const SHIMMER_WIDTH = 3;
+const WORKING_PHRASE_INTERVAL_MS = 20_000;
 
 const WORKING_PHRASES = [
   "Appeasing the linter",
@@ -37,8 +38,12 @@ const WORKING_PHRASES = [
   "Waking the ancient APIs",
 ] as const;
 
-function randomWorkingPhrase(): string {
-  return WORKING_PHRASES[Math.floor(Math.random() * WORKING_PHRASES.length)] ?? "Working";
+function randomWorkingPhrase(previousPhrase?: string): string {
+  const index = Math.floor(Math.random() * WORKING_PHRASES.length);
+  const phrase = WORKING_PHRASES[index] ?? "Working";
+  if (phrase !== previousPhrase) return phrase;
+
+  return WORKING_PHRASES[(index + 1) % WORKING_PHRASES.length] ?? "Working";
 }
 
 function formatDuration(milliseconds: number): string {
@@ -71,6 +76,7 @@ function shimmer(text: string, theme: Theme, tick: number): string {
 
 export default function (pi: ExtensionAPI) {
   let requestStartedAt: number | null = null;
+  let nextPhraseChangeAt: number | null = null;
   let workingPhrase: string | null = null;
   let shimmerTick = 0;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
@@ -79,6 +85,7 @@ export default function (pi: ExtensionAPI) {
     if (workingTimer !== undefined) clearInterval(workingTimer);
     workingTimer = undefined;
     requestStartedAt = null;
+    nextPhraseChangeAt = null;
     workingPhrase = null;
     shimmerTick = 0;
   };
@@ -87,17 +94,23 @@ export default function (pi: ExtensionAPI) {
     if (ctx.mode !== "tui") return;
     if (requestStartedAt === null) {
       requestStartedAt = performance.now();
+      nextPhraseChangeAt = requestStartedAt + WORKING_PHRASE_INTERVAL_MS;
       workingPhrase = randomWorkingPhrase();
       shimmerTick = 0;
     }
 
     const updateWorkingMessage = () => {
       if (requestStartedAt === null || workingPhrase === null) return;
+
+      const now = performance.now();
+      if (nextPhraseChangeAt !== null && now >= nextPhraseChangeAt) {
+        workingPhrase = randomWorkingPhrase(workingPhrase);
+        nextPhraseChangeAt = now + WORKING_PHRASE_INTERVAL_MS;
+        shimmerTick = 0;
+      }
+
       const message = shimmer(`${workingPhrase}...`, ctx.ui.theme, shimmerTick++);
-      const elapsed = ctx.ui.theme.fg(
-        "dim",
-        ` ${formatDuration(performance.now() - requestStartedAt)}`,
-      );
+      const elapsed = ctx.ui.theme.fg("dim", ` ${formatDuration(now - requestStartedAt)}`);
       ctx.ui.setWorkingMessage(message + elapsed);
     };
 
