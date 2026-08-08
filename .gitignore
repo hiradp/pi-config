@@ -16,6 +16,7 @@
 !/extensions/
 /extensions/*
 !/extensions/footer.ts
+!/extensions/usage.ts
 !/extensions/working-message.ts
 !/extensions/guardrails/
 !/extensions/guardrails/**
