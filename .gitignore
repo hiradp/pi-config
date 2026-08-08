@@ -13,6 +13,9 @@
 !/settings.json
 !/tsconfig.json
 
+!/themes/
+!/themes/*.json
+
 !/extensions/
 /extensions/*
 !/extensions/footer.ts
