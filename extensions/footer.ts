@@ -518,11 +518,7 @@ export default function (pi: ExtensionAPI) {
             parts.push(basename(ctx.cwd));
           }
 
-          const modelId = ctx.model?.id ?? "no-model";
-          let modelPart =
-            footerData.getAvailableProviderCount() > 1 && ctx.model
-              ? theme.fg("dim", `(${ctx.model.provider}) `) + modelId
-              : modelId;
+          let modelPart = ctx.model?.id ?? "no-model";
           if (ctx.model?.reasoning && ctx.thinkingLevel) {
             const level = ctx.thinkingLevel;
             const colored =
