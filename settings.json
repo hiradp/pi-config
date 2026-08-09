@@ -19,28 +19,14 @@
   "editorPaddingX": 1,
   "guardrails": {
     "commands": {
-      "blocked": [
-        "wrangler"
-      ]
+      "blocked": ["wrangler"]
     },
     "defaultBranch": {
-      "allowed": [
-        "hiradp/*"
-      ]
+      "allowed": ["hiradp/*"]
     },
     "paths": {
-      "blocked": [
-        ".git",
-        ".git/**",
-        "~/.ssh"
-      ],
-      "confirm": [
-        ".env",
-        ".env.*",
-        ".pi",
-        ".pi/**",
-        "~/.ssh/**"
-      ]
+      "blocked": [".git", ".git/**", "~/.ssh"],
+      "confirm": [".env", ".env.*", ".pi", ".pi/**", "~/.ssh/**"]
     },
     "semanticReview": {
       "enabled": true,
@@ -115,3 +101,4 @@
   "enableInstallTelemetry": false,
   "defaultProjectTrust": "ask"
 }
+
