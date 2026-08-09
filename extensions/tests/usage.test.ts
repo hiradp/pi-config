@@ -114,7 +114,7 @@ test("aggregates calendar day, Monday-based week, and month in local time", () =
   assert.equal(report.periods.day.totals.input, 10);
   assert.equal(report.periods.week.totals.input, 30);
   assert.equal(report.periods.month.totals.input, 100);
-  assert.equal(report.eventCount, 4);
+  assert.equal(report.eventCount, 5);
   assert.equal(report.periods.week.start, new Date(2026, 2, 16).getTime());
   assert.equal(report.periods.month.start, new Date(2026, 2, 1).getTime());
 });
@@ -131,6 +131,70 @@ test("includes the previous month when the current week crosses a month boundary
 
   assert.equal(report.periods.week.totals.input, 20);
   assert.equal(report.periods.month.totals.input, 0);
+});
+
+test("builds a rolling seven-day trend with empty calendar-day buckets", () => {
+  const now = new Date(2026, 2, 18, 12);
+  const firstDay = assistantEntry({
+    id: "first-day",
+    at: new Date(2026, 2, 12, 8),
+    usage: usage(10, 2),
+  });
+  const today = assistantEntry({
+    id: "today",
+    at: new Date(2026, 2, 18, 8),
+    usage: usage(20, 3),
+  });
+  const beforeRange = assistantEntry({
+    id: "before-range",
+    at: new Date(2026, 2, 11, 8),
+    usage: usage(30, 4),
+  });
+
+  const report = aggregateUsage([[firstDay, today, beforeRange]], now);
+  const buckets = report.trends.daily7;
+
+  assert.equal(buckets.length, 7);
+  assert.equal(buckets[0]?.start, new Date(2026, 2, 12).getTime());
+  assert.equal(buckets[0]?.totals.input, 10);
+  assert.equal(buckets[1]?.totals.input, 0);
+  assert.equal(buckets[6]?.totals.input, 20);
+  assert.equal(
+    buckets.reduce((sum, bucket) => sum + bucket.totals.input, 0),
+    30,
+  );
+});
+
+test("groups the trailing 30 days into Monday-based weeks clipped to the range", () => {
+  const now = new Date(2026, 2, 18, 12);
+  const firstPartialWeek = assistantEntry({
+    id: "first-partial-week",
+    at: new Date(2026, 1, 17, 8),
+    usage: usage(10, 2),
+  });
+  const firstMonday = assistantEntry({
+    id: "first-monday",
+    at: new Date(2026, 1, 23, 8),
+    usage: usage(20, 3),
+  });
+  const currentWeek = assistantEntry({
+    id: "current-week",
+    at: new Date(2026, 2, 16, 8),
+    usage: usage(30, 4),
+  });
+
+  const report = aggregateUsage([[firstPartialWeek, firstMonday, currentWeek]], now);
+  const buckets = report.trends.weekly30;
+
+  assert.equal(buckets.length, 5);
+  assert.equal(buckets[0]?.start, new Date(2026, 1, 17).getTime());
+  assert.equal(buckets[0]?.endExclusive, new Date(2026, 1, 23).getTime());
+  assert.equal(buckets[0]?.totals.input, 10);
+  assert.equal(buckets[1]?.start, new Date(2026, 1, 23).getTime());
+  assert.equal(buckets[1]?.totals.input, 20);
+  assert.equal(buckets[4]?.start, new Date(2026, 2, 16).getTime());
+  assert.equal(buckets[4]?.endExclusive, new Date(2026, 2, 19).getTime());
+  assert.equal(buckets[4]?.totals.input, 30);
 });
 
 test("groups assistant usage by provider and actual response model", () => {

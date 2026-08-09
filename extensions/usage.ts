@@ -20,10 +20,12 @@ import {
 } from "@earendil-works/pi-tui";
 
 const PERIOD_KEYS = ["day", "week", "month"] as const;
+const TREND_KEYS = ["daily7", "weekly30"] as const;
 const UNATTRIBUTED_PROVIDER = "Unattributed";
 const UNATTRIBUTED_MODEL = "Tools / summaries";
 
 export type UsagePeriodKey = (typeof PERIOD_KEYS)[number];
+export type UsageTrendKey = (typeof TREND_KEYS)[number];
 
 export interface UsageTotals {
   input: number;
@@ -45,6 +47,12 @@ export interface PeriodUsage {
   models: ModelUsage[];
 }
 
+export interface UsageBucket {
+  start: number;
+  endExclusive: number;
+  totals: UsageTotals;
+}
+
 export interface UsageReport {
   generatedAt: number;
   sessionCount: number;
@@ -52,6 +60,7 @@ export interface UsageReport {
   eventCount: number;
   deduplicatedEntries: number;
   periods: Record<UsagePeriodKey, PeriodUsage>;
+  trends: Record<UsageTrendKey, UsageBucket[]>;
 }
 
 interface UsageEvent {
@@ -207,9 +216,20 @@ function eventFromEntry(entry: SessionEntry): UsageEvent | null {
   return null;
 }
 
-function periodStarts(now: Date): Record<UsagePeriodKey, number> {
-  const day = new Date(now);
+function localDayStart(date: Date): number {
+  const day = new Date(date);
   day.setHours(0, 0, 0, 0);
+  return day.getTime();
+}
+
+function addLocalDays(timestamp: number, days: number): number {
+  const date = new Date(timestamp);
+  date.setDate(date.getDate() + days);
+  return date.getTime();
+}
+
+function periodStarts(now: Date): Record<UsagePeriodKey, number> {
+  const day = new Date(localDayStart(now));
 
   const week = new Date(day);
   week.setDate(week.getDate() - ((week.getDay() + 6) % 7));
@@ -218,6 +238,29 @@ function periodStarts(now: Date): Record<UsagePeriodKey, number> {
   month.setDate(1);
 
   return { day: day.getTime(), week: week.getTime(), month: month.getTime() };
+}
+
+function trendBuckets(now: Date): Record<UsageTrendKey, UsageBucket[]> {
+  const today = localDayStart(now);
+  const dailyStart = addLocalDays(today, -6);
+  const daily7 = Array.from({ length: 7 }, (_, index) => {
+    const start = addLocalDays(dailyStart, index);
+    return { start, endExclusive: addLocalDays(start, 1), totals: emptyTotals() };
+  });
+
+  const weekly30: UsageBucket[] = [];
+  const endExclusive = addLocalDays(today, 1);
+  let start = addLocalDays(today, -29);
+  while (start < endExclusive) {
+    const weekday = new Date(start).getDay();
+    const daysToMonday = (8 - weekday) % 7 || 7;
+    const nextMonday = addLocalDays(start, daysToMonday);
+    const end = Math.min(nextMonday, endExclusive);
+    weekly30.push({ start, endExclusive: end, totals: emptyTotals() });
+    start = end;
+  }
+
+  return { daily7, weekly30 };
 }
 
 function mutablePeriod(key: UsagePeriodKey, start: number): MutablePeriodUsage {
@@ -256,13 +299,17 @@ export function aggregateUsage(
   if (!Number.isFinite(generatedAt)) throw new Error("Cannot aggregate usage for an invalid date");
 
   const starts = periodStarts(now);
+  const trends = trendBuckets(now);
   const mutablePeriods: Record<UsagePeriodKey, MutablePeriodUsage> = {
     day: mutablePeriod("day", starts.day),
     week: mutablePeriod("week", starts.week),
     month: mutablePeriod("month", starts.month),
   };
   const seen = new Set<string>();
-  const earliestStart = Math.min(...Object.values(starts));
+  const earliestStart = Math.min(
+    ...Object.values(starts),
+    ...TREND_KEYS.map((key) => trends[key][0]?.start ?? generatedAt),
+  );
   let eventCount = 0;
   let deduplicatedEntries = 0;
 
@@ -280,6 +327,12 @@ export function aggregateUsage(
       for (const key of PERIOD_KEYS) {
         if (event.timestamp >= starts[key]) addEvent(mutablePeriods[key], event);
       }
+      for (const key of TREND_KEYS) {
+        const bucket = trends[key].find(
+          ({ start, endExclusive }) => event.timestamp >= start && event.timestamp < endExclusive,
+        );
+        if (bucket) addTotals(bucket.totals, event.usage);
+      }
     }
   }
 
@@ -294,6 +347,7 @@ export function aggregateUsage(
       week: finalizePeriod(mutablePeriods.week),
       month: finalizePeriod(mutablePeriods.month),
     },
+    trends,
   };
 }
 
@@ -454,8 +508,117 @@ function formatRange(period: PeriodUsage, generatedAt: number): string {
   return `${date.format(start)} – ${date.format(end)}`;
 }
 
+type UsageViewMode = "summary" | "trend";
+type TrendMetric = "tokens" | "cost";
+
+function scanDetails(report: UsageReport): string {
+  const details = [`${report.sessionCount} sessions`, `${report.eventCount} usage records`];
+  if (report.deduplicatedEntries > 0) {
+    details.push(`${report.deduplicatedEntries} copied records deduplicated`);
+  }
+  if (report.skippedFiles > 0) {
+    details.push(`${report.skippedFiles} unreadable files skipped`);
+  }
+  return details.join(" · ");
+}
+
+function trendValue(totals: UsageTotals, metric: TrendMetric): number {
+  return metric === "tokens" ? totalTokens(totals) : totals.cost;
+}
+
+function trendBucketLabel(bucket: UsageBucket, key: UsageTrendKey): string {
+  const start = new Date(bucket.start);
+  if (key === "daily7") {
+    return new Intl.DateTimeFormat(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    }).format(start);
+  }
+
+  const end = new Date(addLocalDays(bucket.endExclusive, -1));
+  const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+  const startLabel = date.format(start);
+  const endLabel = date.format(end);
+  return startLabel === endLabel ? startLabel : `${startLabel}–${endLabel}`;
+}
+
+function trendRange(buckets: readonly UsageBucket[], generatedAt: number): string {
+  const start = buckets[0]?.start ?? generatedAt;
+  const date = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  return `${date.format(new Date(start))} – ${date.format(new Date(generatedAt))}`;
+}
+
+function chartBar(value: number, maximum: number, width: number, theme: Theme): string {
+  if (width <= 0) return "";
+  if (value <= 0 || maximum <= 0) return " ".repeat(width);
+
+  const scaled = Math.min(width, (value / maximum) * width);
+  let fullBlocks = Math.floor(scaled);
+  let fraction = "";
+  if (fullBlocks < width) {
+    const fractions = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    let fractionIndex = Math.floor((scaled - fullBlocks) * 8);
+    if (fullBlocks === 0 && fractionIndex === 0) fractionIndex = 1;
+    fraction = fractions[fractionIndex] ?? "";
+  } else {
+    fullBlocks = width;
+  }
+
+  const filled = "█".repeat(fullBlocks) + fraction;
+  return theme.fg("accent", filled) + " ".repeat(Math.max(0, width - visibleWidth(filled)));
+}
+
+function chartLine(
+  bucket: UsageBucket,
+  key: UsageTrendKey,
+  metric: TrendMetric,
+  maximum: number,
+  width: number,
+  theme: Theme,
+): string {
+  const label = trendBucketLabel(bucket, key);
+  const tokenText = formatTokenCount(totalTokens(bucket.totals));
+  const costText = formatUsageCost(bucket.totals.cost);
+  let showBothValues = true;
+  let valueWidth = visibleWidth(`${tokenText}  ${costText}`);
+  const idealLabelWidth = key === "daily7" ? 14 : 19;
+  const labelWidth = Math.min(idealLabelWidth, Math.max(6, Math.floor(width * 0.3)));
+  let barWidth = width - labelWidth - valueWidth - 4;
+
+  if (barWidth < 3) {
+    showBothValues = false;
+    valueWidth = visibleWidth(metric === "tokens" ? tokenText : costText);
+    barWidth = width - labelWidth - valueWidth - 4;
+  }
+
+  const values = showBothValues
+    ? theme.fg("text", tokenText) + theme.fg("dim", "  ") + theme.fg("accent", costText)
+    : theme.fg(metric === "tokens" ? "text" : "accent", metric === "tokens" ? tokenText : costText);
+
+  if (barWidth < 1) {
+    const compactLabelWidth = Math.max(1, width - valueWidth - 1);
+    return theme.fg("muted", fitCell(label, compactLabelWidth)) + " " + values;
+  }
+
+  return (
+    theme.fg("muted", fitCell(label, labelWidth)) +
+    "  " +
+    chartBar(trendValue(bucket.totals, metric), maximum, barWidth, theme) +
+    "  " +
+    values
+  );
+}
+
 class UsageView implements Component {
+  private view: UsageViewMode = "summary";
   private periodIndex = 0;
+  private trendIndex = 0;
+  private metric: TrendMetric = "tokens";
   private offset = 0;
   private pageSize = 1;
   private maxOffset = 0;
@@ -478,36 +641,52 @@ class UsageView implements Component {
     }
 
     let changed = false;
-    if (matchesKey(data, Key.left)) {
-      this.periodIndex = (this.periodIndex + PERIOD_KEYS.length - 1) % PERIOD_KEYS.length;
-      this.offset = 0;
+    if (matchesKey(data, Key.tab) || matchesKey(data, "g")) {
+      this.view = this.view === "summary" ? "trend" : "summary";
       changed = true;
-    } else if (matchesKey(data, Key.right) || matchesKey(data, Key.tab)) {
-      this.periodIndex = (this.periodIndex + 1) % PERIOD_KEYS.length;
-      this.offset = 0;
+    } else if (matchesKey(data, "m") && this.view === "trend") {
+      this.metric = this.metric === "tokens" ? "cost" : "tokens";
+      changed = true;
+    } else if (matchesKey(data, Key.left)) {
+      if (this.view === "summary") {
+        this.periodIndex = (this.periodIndex + PERIOD_KEYS.length - 1) % PERIOD_KEYS.length;
+        this.offset = 0;
+      } else {
+        this.trendIndex = (this.trendIndex + TREND_KEYS.length - 1) % TREND_KEYS.length;
+      }
+      changed = true;
+    } else if (matchesKey(data, Key.right)) {
+      if (this.view === "summary") {
+        this.periodIndex = (this.periodIndex + 1) % PERIOD_KEYS.length;
+        this.offset = 0;
+      } else {
+        this.trendIndex = (this.trendIndex + 1) % TREND_KEYS.length;
+      }
       changed = true;
     } else if (matchesKey(data, "1")) {
-      this.periodIndex = 0;
+      if (this.view === "summary") this.periodIndex = 0;
+      else this.trendIndex = 0;
       this.offset = 0;
       changed = true;
     } else if (matchesKey(data, "2")) {
-      this.periodIndex = 1;
+      if (this.view === "summary") this.periodIndex = 1;
+      else this.trendIndex = 1;
       this.offset = 0;
       changed = true;
-    } else if (matchesKey(data, "3")) {
+    } else if (matchesKey(data, "3") && this.view === "summary") {
       this.periodIndex = 2;
       this.offset = 0;
       changed = true;
-    } else if (matchesKey(data, Key.up)) {
+    } else if (matchesKey(data, Key.up) && this.view === "summary") {
       this.offset = Math.max(0, this.offset - 1);
       changed = true;
-    } else if (matchesKey(data, Key.down)) {
+    } else if (matchesKey(data, Key.down) && this.view === "summary") {
       this.offset = Math.min(this.maxOffset, this.offset + 1);
       changed = true;
-    } else if (matchesKey(data, Key.pageUp)) {
+    } else if (matchesKey(data, Key.pageUp) && this.view === "summary") {
       this.offset = Math.max(0, this.offset - this.pageSize);
       changed = true;
-    } else if (matchesKey(data, Key.pageDown)) {
+    } else if (matchesKey(data, Key.pageDown) && this.view === "summary") {
       this.offset = Math.min(this.maxOffset, this.offset + this.pageSize);
       changed = true;
     }
@@ -516,23 +695,44 @@ class UsageView implements Component {
   }
 
   render(width: number): string[] {
+    const output = this.view === "summary" ? this.renderSummary(width) : this.renderTrend(width);
+    return output.map((line) => truncateToWidth(line, width, ""));
+  }
+
+  private line(text: string, width: number): string {
+    return truncateToWidth(` ${text}`, width, "");
+  }
+
+  private separator(width: number): string {
+    return this.theme.fg("border", "─".repeat(Math.max(1, width)));
+  }
+
+  private tabs(labels: readonly string[], selected: number): string {
+    return labels
+      .map((label, index) =>
+        index === selected
+          ? this.theme.fg("accent", this.theme.bold(`[${label}]`))
+          : this.theme.fg("muted", label),
+      )
+      .join(this.theme.fg("dim", "  "));
+  }
+
+  private viewTabs(): string {
+    return this.tabs(["Summary", "Trend"], this.view === "summary" ? 0 : 1);
+  }
+
+  private renderSummary(width: number): string[] {
     const key = PERIOD_KEYS[this.periodIndex] ?? "day";
     const period = this.report.periods[key];
     const rows = displayRows(period);
     const innerWidth = Math.max(1, width - 2);
     const columns = tableColumns(innerWidth);
-    const availableRows = Math.max(3, Math.min(20, this.tui.terminal.rows - 11));
+    const availableRows = Math.max(3, Math.min(20, this.tui.terminal.rows - 12));
     this.pageSize = availableRows;
     this.maxOffset = Math.max(0, rows.length - availableRows);
     this.offset = Math.min(this.offset, this.maxOffset);
 
-    const line = (text: string) => truncateToWidth(` ${text}`, width, "");
-    const tabs = PERIOD_KEYS.map((periodKey, index) => {
-      const label = { day: "Today", week: "This week", month: "This month" }[periodKey];
-      return index === this.periodIndex
-        ? this.theme.fg("accent", this.theme.bold(`[${label}]`))
-        : this.theme.fg("muted", label);
-    }).join(this.theme.fg("dim", "  "));
+    const periodTabs = this.tabs(["Today", "This week", "This month"], this.periodIndex);
     const cacheTokens = period.totals.cacheRead + period.totals.cacheWrite;
     const total =
       this.theme.fg("text", `${formatTokenCount(totalTokens(period.totals))} tokens`) +
@@ -542,47 +742,93 @@ class UsageView implements Component {
       this.theme.fg("dim", ` cache ${formatTokenCount(cacheTokens)}`) +
       this.theme.fg("dim", " · ") +
       this.theme.fg("accent", formatUsageCost(period.totals.cost));
-    const separator = this.theme.fg("border", "─".repeat(Math.max(1, width)));
     const output = [
-      line(this.theme.fg("accent", this.theme.bold("Token usage and cost"))),
-      line(tabs),
-      line(this.theme.fg("dim", `${formatRange(period, this.report.generatedAt)} · local time`)),
-      line(total),
-      separator,
-      line(tableLine(null, innerWidth, this.theme, columns)),
+      this.line(this.theme.fg("accent", this.theme.bold("Token usage and cost")), width),
+      this.line(this.viewTabs(), width),
+      this.line(periodTabs, width),
+      this.line(
+        this.theme.fg("dim", `${formatRange(period, this.report.generatedAt)} · local time`),
+        width,
+      ),
+      this.line(total, width),
+      this.separator(width),
+      this.line(tableLine(null, innerWidth, this.theme, columns), width),
     ];
 
     if (rows.length === 0) {
-      output.push(line(this.theme.fg("muted", "No recorded usage for this period.")));
+      output.push(this.line(this.theme.fg("muted", "No recorded usage for this period."), width));
     } else {
       for (const row of rows.slice(this.offset, this.offset + availableRows)) {
-        output.push(line(tableLine(row, innerWidth, this.theme, columns)));
+        output.push(this.line(tableLine(row, innerWidth, this.theme, columns), width));
       }
     }
 
     if (this.maxOffset > 0) {
       const first = this.offset + 1;
       const last = Math.min(rows.length, this.offset + availableRows);
-      output.push(line(this.theme.fg("dim", `Rows ${first}–${last} of ${rows.length}`)));
-    }
-
-    const scanDetails = [
-      `${this.report.sessionCount} sessions`,
-      `${this.report.eventCount} usage records`,
-    ];
-    if (this.report.deduplicatedEntries > 0) {
-      scanDetails.push(`${this.report.deduplicatedEntries} copied records deduplicated`);
-    }
-    if (this.report.skippedFiles > 0) {
-      scanDetails.push(`${this.report.skippedFiles} unreadable files skipped`);
+      output.push(
+        this.line(this.theme.fg("dim", `Rows ${first}–${last} of ${rows.length}`), width),
+      );
     }
 
     output.push(
-      separator,
-      line(this.theme.fg("dim", scanDetails.join(" · "))),
-      line(this.theme.fg("dim", "←/→ period · ↑/↓ scroll · enter/esc/q close")),
+      this.separator(width),
+      this.line(this.theme.fg("dim", scanDetails(this.report)), width),
+      this.line(
+        this.theme.fg("dim", "tab trend · ←/→ period · ↑/↓ scroll · enter/esc/q close"),
+        width,
+      ),
     );
-    return output.map((outputLine) => truncateToWidth(outputLine, width, ""));
+    return output;
+  }
+
+  private renderTrend(width: number): string[] {
+    const key = TREND_KEYS[this.trendIndex] ?? "daily7";
+    const buckets = this.report.trends[key];
+    const innerWidth = Math.max(1, width - 2);
+    const totals = emptyTotals();
+    for (const bucket of buckets) addTotals(totals, bucket.totals);
+    const maximum = Math.max(0, ...buckets.map((bucket) => trendValue(bucket.totals, this.metric)));
+    const rangeTabs = this.tabs(["7 days · daily", "30 days · weekly"], this.trendIndex);
+    const metricTabs = this.tabs(["Tokens", "Cost"], this.metric === "tokens" ? 0 : 1);
+    const controls = rangeTabs + this.theme.fg("dim", "   ·   ") + metricTabs;
+    const days = key === "daily7" ? 7 : 30;
+    const average =
+      this.metric === "tokens"
+        ? `${formatTokenCount(totalTokens(totals) / days)} tokens/day`
+        : `${formatUsageCost(totals.cost / days)}/day`;
+    const total =
+      this.theme.fg("text", `${formatTokenCount(totalTokens(totals))} tokens`) +
+      this.theme.fg("dim", " · ") +
+      this.theme.fg("accent", formatUsageCost(totals.cost)) +
+      this.theme.fg("dim", ` · avg ${average}`);
+    const output = [
+      this.line(this.theme.fg("accent", this.theme.bold("Token usage and cost")), width),
+      this.line(this.viewTabs(), width),
+      this.line(controls, width),
+      this.line(
+        this.theme.fg("dim", `${trendRange(buckets, this.report.generatedAt)} · local time`),
+        width,
+      ),
+      this.line(total, width),
+      this.separator(width),
+    ];
+
+    for (const bucket of buckets) {
+      output.push(
+        this.line(chartLine(bucket, key, this.metric, maximum, innerWidth, this.theme), width),
+      );
+    }
+
+    output.push(
+      this.separator(width),
+      this.line(this.theme.fg("dim", scanDetails(this.report)), width),
+      this.line(
+        this.theme.fg("dim", "tab summary · ←/→ range · m metric · enter/esc/q close"),
+        width,
+      ),
+    );
+    return output;
   }
 
   invalidate(): void {}
@@ -594,7 +840,7 @@ function errorMessage(error: unknown): string {
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("usage", {
-    description: "Show daily, weekly, and monthly token usage and cost",
+    description: "Show token usage, cost, and recent trends",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") {
         if (ctx.hasUI)
