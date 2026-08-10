@@ -23,6 +23,8 @@
 !/extensions/notion.ts
 !/extensions/usage.ts
 !/extensions/working-message.ts
+!/extensions/slack/
+!/extensions/slack/**
 !/extensions/guardrails/
 !/extensions/guardrails/**
 !/extensions/tests/

@@ -13,6 +13,13 @@ Notion.app session from the Keychain and cookie database. The extension only cal
 read endpoints. Its approach is inspired by
 [Matt Robenolt's Notion extension](https://github.com/mattrobenolt/pi-configs/tree/main/packages/notion).
 
+## Slack
+
+`extensions/slack/` provides fixed read-only tools backed by Slack's official hosted MCP server.
+It uses public-client PKCE OAuth and stores credentials only in the operating system keyring. See
+[`extensions/slack/README.md`](extensions/slack/README.md) for Slack app setup, scopes, privacy, and
+session-retention guidance.
+
 ## Development
 
 ```bash
