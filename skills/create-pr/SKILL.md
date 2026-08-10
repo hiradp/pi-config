@@ -39,8 +39,11 @@ Create one focused pull request from the current repository while preserving the
 - Use a concise, specific title in the repository's established style.
 - Keep the body terse, informal, and human. Avoid marketing language, generic filler, and unnecessary narration.
 - Follow the PR template rather than inventing a competing format.
-- Explain the reason for the change, the meaningful implementation details, and the exact validation performed.
-- State skipped or failing checks honestly, including why they were not completed.
+- Explain the reason for the change and the meaningful implementation details.
+- Do not add a testing section for routine unit or integration tests, linters, type checks, builds, or other validation expected to run in CI.
+- Mention testing only when a novel, manual, or environment-specific check gives reviewers information that CI does not. Describe the behavior and result briefly; do not paste commands, flags, counts, timings, or terminal output.
+- Disclose a failing or intentionally skipped required check only when it creates review or merge risk; do not add boilerplate such as "full test suite not run."
+- Do not invent a security section. If the repository template asks for security impact and there is none, answer only `None.` without justification or reassurance. If there is a material security impact, state it and any mitigation concisely.
 - Mention risk, rollout, compatibility, or follow-up work only when relevant.
 - Do not mention AI assistance unless the user explicitly asks.
 - Do not include unrelated changes just to make the PR appear more complete.
@@ -51,11 +54,9 @@ If no template exists, use this minimal structure:
 ## What
 
 <why this is needed and what changed>
-
-## Testing
-
-<exact checks run, or "Not run" with a reason>
 ```
+
+Add another section only when it contains relevant, non-routine information.
 
 ## Publish safely
 
