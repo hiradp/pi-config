@@ -2,15 +2,23 @@
  * Working Message - shows a random phrase and elapsed time in Pi's working row.
  *
  * The phrase rotates every 20 seconds while a themed shimmer moves across it.
- * Elapsed time runs from before_agent_start until agent_settled.
+ * Elapsed time runs from before_agent_start until agent_settled. Completed
+ * durations are stored in the session and rendered beneath each response.
  */
 
 import { performance } from "node:perf_hooks";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
 const SHIMMER_INTERVAL_MS = 100;
 const SHIMMER_WIDTH = 3;
 const WORKING_PHRASE_INTERVAL_MS = 20_000;
+const WORKING_MESSAGE_ENTRY = "working-message";
+
+interface WorkingMessageEntryData {
+  phrase: string;
+  durationMs: number;
+}
 
 const WORKING_PHRASES = [
   "Appeasing the linter",
@@ -46,7 +54,7 @@ function randomWorkingPhrase(previousPhrase?: string): string {
   return WORKING_PHRASES[(index + 1) % WORKING_PHRASES.length] ?? "Working";
 }
 
-function formatDuration(milliseconds: number): string {
+export function formatDuration(milliseconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   if (totalSeconds < 60) return `${totalSeconds}s`;
 
@@ -80,6 +88,18 @@ export default function (pi: ExtensionAPI) {
   let workingPhrase: string | null = null;
   let shimmerTick = 0;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
+
+  pi.registerEntryRenderer<WorkingMessageEntryData>(
+    WORKING_MESSAGE_ENTRY,
+    (entry, _options, theme) => {
+      if (!entry.data) return;
+
+      const elapsed = formatDuration(entry.data.durationMs);
+      const check = theme.fg("success", "✓");
+      const message = theme.fg("dim", `${entry.data.phrase}... ${elapsed}`);
+      return new Text(`${check} ${message}`, 0, 0);
+    },
+  );
 
   const stopWorkingTimer = () => {
     if (workingTimer !== undefined) clearInterval(workingTimer);
@@ -121,8 +141,16 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", (_event, ctx) => {
+    const completed =
+      requestStartedAt !== null && workingPhrase !== null
+        ? { phrase: workingPhrase, durationMs: performance.now() - requestStartedAt }
+        : null;
+
     stopWorkingTimer();
-    if (ctx.mode === "tui") ctx.ui.setWorkingMessage();
+    if (ctx.mode !== "tui") return;
+
+    ctx.ui.setWorkingMessage();
+    if (completed) pi.appendEntry<WorkingMessageEntryData>(WORKING_MESSAGE_ENTRY, completed);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
