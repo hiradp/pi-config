@@ -60,8 +60,7 @@ test("persists the completed working message in the session transcript", () => {
   assert.equal(entries[0]?.customType, "working-message");
   assert.equal(workingMessages.at(-1), undefined);
 
-  const data = entries[0]?.data as { phrase: string; durationMs: number };
-  assert.ok(data.phrase.length > 0);
+  const data = entries[0]?.data as { durationMs: number };
   assert.ok(data.durationMs >= 0);
   assert.ok(entryRenderer);
 
@@ -79,8 +78,5 @@ test("persists the completed working message in the session transcript", () => {
   );
 
   assert.ok(component);
-  assert.equal(
-    component.render(100)[0]?.trimEnd(),
-    `✓ ${data.phrase}... ${formatDuration(data.durationMs)}`,
-  );
+  assert.equal(component.render(100)[0]?.trimEnd(), `✓ Done in ${formatDuration(data.durationMs)}`);
 });

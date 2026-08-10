@@ -16,7 +16,6 @@ const WORKING_PHRASE_INTERVAL_MS = 20_000;
 const WORKING_MESSAGE_ENTRY = "working-message";
 
 interface WorkingMessageEntryData {
-  phrase: string;
   durationMs: number;
 }
 
@@ -96,7 +95,7 @@ export default function (pi: ExtensionAPI) {
 
       const elapsed = formatDuration(entry.data.durationMs);
       const check = theme.fg("success", "✓");
-      const message = theme.fg("dim", `${entry.data.phrase}... ${elapsed}`);
+      const message = theme.fg("dim", `Done in ${elapsed}`);
       return new Text(`${check} ${message}`, 0, 0);
     },
   );
@@ -141,16 +140,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", (_event, ctx) => {
-    const completed =
-      requestStartedAt !== null && workingPhrase !== null
-        ? { phrase: workingPhrase, durationMs: performance.now() - requestStartedAt }
-        : null;
+    const durationMs = requestStartedAt !== null ? performance.now() - requestStartedAt : null;
 
     stopWorkingTimer();
     if (ctx.mode !== "tui") return;
 
     ctx.ui.setWorkingMessage();
-    if (completed) pi.appendEntry<WorkingMessageEntryData>(WORKING_MESSAGE_ENTRY, completed);
+    if (durationMs !== null) {
+      pi.appendEntry<WorkingMessageEntryData>(WORKING_MESSAGE_ENTRY, { durationMs });
+    }
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
