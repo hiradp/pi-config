@@ -120,9 +120,6 @@ export class SlackAuth {
   }
 
   async login(): Promise<SlackCredentials> {
-    if (!this.config.clientId) {
-      throw new Error("Set SLACK_MCP_CLIENT_ID to the organization's public Slack app client ID.");
-    }
     if (this.loginController) throw new Error("A Slack login is already in progress.");
 
     const controller = new AbortController();
@@ -138,6 +135,11 @@ export class SlackAuth {
     try {
       if (await this.load()) {
         throw new Error("Slack is already authenticated. Run /slack-logout first.");
+      }
+      if (!this.config.clientId) {
+        throw new Error(
+          "Set SLACK_MCP_CLIENT_ID to the organization's public Slack app client ID.",
+        );
       }
       flowSignal.throwIfAborted();
       const metadata = await discoverOAuthMetadata(this.fetchImpl, flowSignal);
@@ -296,14 +298,15 @@ export class SlackAuth {
       const requestSignal = combinedSignal(signal, this.config.requestTimeoutMs);
       try {
         const metadata = await discoverOAuthMetadata(this.fetchImpl, requestSignal);
+        const effectiveConfig = configForStoredCredentials(this.config, current);
         const token = await refreshAccessToken(
           this.fetchImpl,
           metadata.authorization,
-          this.config,
+          effectiveConfig,
           current.refreshToken!,
           requestSignal,
         );
-        const refreshed = validateRefreshedToken(token, current, this.config, this.now());
+        const refreshed = validateRefreshedToken(token, current, effectiveConfig, this.now());
         await this.transitionLock.run(async () => {
           if (refreshGeneration !== this.generation) {
             throw new Error("Slack authentication changed while refreshing.");
@@ -572,6 +575,9 @@ export function validateInitialToken(
   config: SlackConfig,
   now: number,
 ): SlackCredentials {
+  if (!config.clientId) {
+    throw new Error("Set SLACK_MCP_CLIENT_ID to the organization's public Slack app client ID.");
+  }
   validateUserAccessToken(response.accessToken, response.tokenType);
   if (!response.scopes) throw new Error("Slack did not return a verifiable OAuth scope list.");
   const scopes = validateEffectiveScopes(response.scopes);
@@ -748,7 +754,7 @@ export async function receiveAuthorizationCode(options: CallbackOptions): Promis
 }
 
 function validateStoredCredentials(credentials: SlackCredentials, config: SlackConfig): void {
-  if (credentials.clientId !== config.clientId) {
+  if (config.clientId && credentials.clientId !== config.clientId) {
     throw new Error("Stored Slack credentials belong to a different client ID.");
   }
   validateUserAccessToken(credentials.accessToken, credentials.tokenType);
@@ -761,6 +767,13 @@ function validateStoredCredentials(credentials: SlackCredentials, config: SlackC
   }
   validateEffectiveScopes(credentials.scopes);
   validateIdentity(credentials.identity, undefined, config);
+}
+
+function configForStoredCredentials(
+  config: SlackConfig,
+  credentials: SlackCredentials,
+): SlackConfig {
+  return config.clientId ? config : { ...config, clientId: credentials.clientId };
 }
 
 function validateUserAccessToken(accessToken: string, tokenType: unknown): void {

@@ -35,11 +35,25 @@ Use a dedicated internal Slack app (or a directory-published app) that Slack per
    mpim:history
    ```
 
-5. Make the non-secret client ID available to Pi:
+5. Make the public, non-secret client ID available only for the initial login. To keep the value out of shell history and tracked configuration, prompt for it in `zsh` and pass it only to that Pi process:
 
    ```sh
-   export SLACK_MCP_CLIENT_ID='123456789.123456789'
+   read -rs "SLACK_MCP_CLIENT_ID?Slack client ID: "
+   printf '\n'
+   SLACK_MCP_CLIENT_ID="$SLACK_MCP_CLIENT_ID" pi --no-session
+   unset SLACK_MCP_CLIENT_ID
    ```
+
+   For `fish`:
+
+   ```fish
+   read --silent --prompt-str 'Slack client ID: ' SLACK_MCP_CLIENT_ID
+   echo
+   env SLACK_MCP_CLIENT_ID="$SLACK_MCP_CLIENT_ID" pi --no-session
+   set --erase SLACK_MCP_CLIENT_ID
+   ```
+
+   Run `/slack-login` in that Pi process. Validated credentials include the client ID and are stored together in the OS keyring. Later normal `pi` invocations use that keyring-bound client ID and do not require the environment variable. Supplying the variable again acts as an explicit client-ID pin; a mismatch invalidates the stored credentials.
 
 For a directory-published app, pin the expected identity as appropriate:
 
@@ -79,7 +93,7 @@ when Slack content must not be retained in a Pi session. The extension has no se
 
 ## Troubleshooting
 
-- **Not authenticated:** run `/slack-login` directly in the TUI. A model tool can never open a browser.
+- **Not authenticated:** provide `SLACK_MCP_CLIENT_ID` to that process and run `/slack-login` directly in the TUI. A model tool can never open a browser. After login, normal invocations read the client ID from the keyring-backed credentials.
 - **Public PKCE client rejected:** confirm PKCE is enabled and the callback URI is an exact match. Do not add a client secret.
 - **Scope validation failed:** remove extra user scopes from the app, then run `/slack-logout` and `/slack-login`.
 - **Authentication expires after about an hour:** Slack MCP may return an expiring access token without a refresh token. Run `/slack-login` again; the extension will not invent a refresh credential.

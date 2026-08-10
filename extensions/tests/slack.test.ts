@@ -489,7 +489,7 @@ test("serialized refresh sends the resource and retains omitted verified fields"
   let tokenRequests = 0;
   let refreshBody: URLSearchParams | undefined;
   const auth = new SlackAuth({
-    config,
+    config: { ...config, clientId: "" },
     store,
     now: () => now,
     fetch: metadataFetch(async (body) => {
@@ -514,10 +514,25 @@ test("serialized refresh sends the resource and retains omitted verified fields"
   assert.equal(tokenRequests, 1);
   assert.ok(grants.every((grant) => grant.accessToken === "xoxp-refreshed"));
   assert.equal(refreshBody?.get("resource"), SLACK_MCP_RESOURCE);
+  assert.equal(refreshBody?.get("client_id"), credentials.clientId);
   assert.equal(refreshBody?.get("refresh_token"), "xoxe-refresh-value");
   assert.equal(store.credentials?.refreshToken, "xoxe-replacement");
   assert.deepEqual(store.credentials?.identity, credentials.identity);
   assert.deepEqual(store.credentials?.scopes, credentials.scopes);
+});
+
+test("stored credentials work without exporting the client ID again", async () => {
+  const store = new MemoryCredentialStore();
+  store.credentials = { ...credentials };
+  const auth = new SlackAuth({
+    config: { ...config, clientId: "" },
+    store,
+  });
+
+  const status = await auth.status();
+  assert.equal(status.authenticated, true);
+  assert.deepEqual(status.identity, credentials.identity);
+  assert.equal(store.deletes, 0);
 });
 
 test("stored credentials are bound to the configured OAuth client", async () => {
