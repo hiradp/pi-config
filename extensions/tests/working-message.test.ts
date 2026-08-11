@@ -7,7 +7,11 @@ import type {
   ExtensionContext,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import workingMessageExtension, { formatDuration } from "../working-message.ts";
+import workingMessageExtension, {
+  formatDuration,
+  formatTokenCount,
+  formatWorkingStats,
+} from "../working-message.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 
@@ -15,6 +19,15 @@ interface AppendedEntry {
   customType: string;
   data: unknown;
 }
+
+test("formats Claude-style working statistics", () => {
+  assert.equal(formatTokenCount(22_900), "22.9k");
+  assert.equal(formatWorkingStats(376_000, 22_900, null), "(6m 16s · ↓ 22.9k tokens)");
+  assert.equal(
+    formatWorkingStats(376_000, 22_900, 10_000),
+    "(6m 16s · ↓ 22.9k tokens · thought for 10s)",
+  );
+});
 
 test("persists the completed working message in the session transcript", () => {
   const handlers = new Map<string, Handler>();
@@ -58,6 +71,7 @@ test("persists the completed working message in the session transcript", () => {
   assert.equal(entryType, "working-message");
   assert.equal(entries.length, 1);
   assert.equal(entries[0]?.customType, "working-message");
+  assert.match(workingMessages[0] ?? "", /… \(0s\)$/);
   assert.equal(workingMessages.at(-1), undefined);
 
   const data = entries[0]?.data as { durationMs: number };
