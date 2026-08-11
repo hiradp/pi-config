@@ -5,6 +5,8 @@ export const SLACK_AUTHORIZATION_ENDPOINT = "https://slack.com/oauth/v2_user/aut
 export const SLACK_TOKEN_ENDPOINT = "https://slack.com/api/oauth.v2.user.access";
 export const SLACK_REDIRECT_URI = "http://localhost:3118/callback";
 
+const SLACK_CLIENT_ID_PATTERN = /^\d+(?:\.\d+)+$/;
+
 export const SLACK_SCOPES = [
   "search:read.public",
   "search:read.private",
@@ -95,7 +97,7 @@ export interface SlackCallResult {
 
 export function loadSlackConfig(environment: NodeJS.ProcessEnv = process.env): SlackConfig {
   const clientId = environment.SLACK_MCP_CLIENT_ID?.trim() ?? "";
-  if (clientId && !/^\d+(?:\.\d+)+$/.test(clientId)) {
+  if (clientId && !isValidSlackClientId(clientId)) {
     throw new Error("SLACK_MCP_CLIENT_ID is not a valid Slack client ID.");
   }
 
@@ -115,6 +117,10 @@ export function loadSlackConfig(environment: NodeJS.ProcessEnv = process.env): S
     maxRetryAfterMs: 5_000,
     maxToolPages: 10,
   };
+}
+
+export function isValidSlackClientId(value: string): boolean {
+  return SLACK_CLIENT_ID_PATTERN.test(value);
 }
 
 function optionalId(value: string | undefined, pattern: RegExp): string | undefined {

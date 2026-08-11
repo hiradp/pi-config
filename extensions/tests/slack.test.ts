@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SlackMcpClient, pinSlackProtocolVersion, type McpConnection } from "../slack/client.ts";
-import { MemoryCredentialStore } from "../slack/credentials.ts";
+import { MemoryClientIdStore, MemoryCredentialStore } from "../slack/credentials.ts";
 import { formatSlackResult } from "../slack/format.ts";
 import { registerSlackExtension } from "../slack/index.ts";
 import {
@@ -406,9 +406,11 @@ test("public PKCE login exchanges without a secret and stores only validated cre
   const store = new MemoryCredentialStore();
   let tokenBody: URLSearchParams | undefined;
   let authorizationUrl: URL | undefined;
+  const clientIdStore = new MemoryClientIdStore();
   const auth = new SlackAuth({
-    config,
+    config: { ...config, clientId: "" },
     store,
+    clientIdStore,
     fetch: metadataFetch(
       (body) => {
         tokenBody = body;
@@ -441,9 +443,10 @@ test("public PKCE login exchanges without a secret and stores only validated cre
     },
   });
 
-  const result = await auth.login();
+  const result = await auth.login(config.clientId);
   assert.equal(result.accessToken, "xoxp-login-access");
   assert.equal(store.writes, 1);
+  assert.equal(clientIdStore.clientId, config.clientId);
   assert.equal(tokenBody?.get("resource"), SLACK_MCP_RESOURCE);
   assert.equal(tokenBody?.get("grant_type"), "authorization_code");
   assert.equal(tokenBody?.get("code"), "temporary-code");
@@ -458,6 +461,7 @@ test("credential write failure never falls back or exposes OAuth values", async 
   const auth = new SlackAuth({
     config,
     store,
+    clientIdStore: new MemoryClientIdStore(),
     fetch: metadataFetch(() =>
       json({
         ok: true,
@@ -491,6 +495,7 @@ test("serialized refresh sends the resource and retains omitted verified fields"
   const auth = new SlackAuth({
     config: { ...config, clientId: "" },
     store,
+    clientIdStore: new MemoryClientIdStore(),
     now: () => now,
     fetch: metadataFetch(async (body) => {
       tokenRequests++;
@@ -524,15 +529,91 @@ test("serialized refresh sends the resource and retains omitted verified fields"
 test("stored credentials work without exporting the client ID again", async () => {
   const store = new MemoryCredentialStore();
   store.credentials = { ...credentials };
+  const clientIdStore = new MemoryClientIdStore();
   const auth = new SlackAuth({
     config: { ...config, clientId: "" },
     store,
+    clientIdStore,
   });
 
   const status = await auth.status();
   assert.equal(status.authenticated, true);
   assert.deepEqual(status.identity, credentials.identity);
+  assert.equal(clientIdStore.clientId, credentials.clientId);
   assert.equal(store.deletes, 0);
+});
+
+test("an expired token is removed without forgetting the public client ID", async () => {
+  const store = new MemoryCredentialStore();
+  store.credentials = {
+    ...credentials,
+    refreshToken: undefined,
+    expiresAt: 0,
+  };
+  const clientIdStore = new MemoryClientIdStore();
+  clientIdStore.clientId = credentials.clientId;
+  const auth = new SlackAuth({
+    config: { ...config, clientId: "" },
+    store,
+    clientIdStore,
+    now: () => 10_000,
+  });
+
+  await assert.rejects(auth.getAccessGrant(), /authentication expired/);
+  assert.equal(store.credentials, undefined);
+  assert.equal(clientIdStore.clientId, credentials.clientId);
+  assert.equal(await auth.hasClientId(), true);
+});
+
+test("a transient refresh failure retains credentials for a later retry", async () => {
+  const store = new MemoryCredentialStore();
+  store.credentials = { ...credentials, expiresAt: 0 };
+  const clientIdStore = new MemoryClientIdStore();
+  clientIdStore.clientId = credentials.clientId;
+  const auth = new SlackAuth({
+    config: { ...config, clientId: "" },
+    store,
+    clientIdStore,
+    now: () => 10_000,
+    fetch: metadataFetch(() => json({ ok: false, error: "server_error" }, { status: 503 })),
+  });
+
+  await assert.rejects(auth.getAccessGrant(), /temporarily unavailable/);
+  assert.deepEqual(store.credentials, { ...credentials, expiresAt: 0 });
+  assert.equal(store.deletes, 0);
+  assert.equal(clientIdStore.clientId, credentials.clientId);
+});
+
+test("an invalid refreshed token removes credentials without forgetting the client ID", async () => {
+  const store = new MemoryCredentialStore();
+  store.credentials = { ...credentials, expiresAt: 0 };
+  const clientIdStore = new MemoryClientIdStore();
+  clientIdStore.clientId = credentials.clientId;
+  let invalidations = 0;
+  const auth = new SlackAuth({
+    config,
+    store,
+    clientIdStore,
+    now: () => 10_000,
+    onInvalidCredentials: () => {
+      invalidations++;
+    },
+    fetch: metadataFetch(() =>
+      json({
+        ok: true,
+        access_token: "xoxb-refreshed-bot",
+        refresh_token: "xoxe-replacement",
+        expires_in: 3600,
+        token_type: "bot",
+      }),
+    ),
+  });
+
+  await assert.rejects(auth.getAccessGrant(), /verified user access token/);
+  assert.equal(store.credentials, undefined);
+  assert.equal(store.deletes, 1);
+  assert.equal(clientIdStore.clientId, credentials.clientId);
+  assert.equal(invalidations, 1);
 });
 
 test("stored credentials are bound to the configured OAuth client", async () => {
@@ -542,6 +623,7 @@ test("stored credentials are bound to the configured OAuth client", async () => 
   const auth = new SlackAuth({
     config,
     store,
+    clientIdStore: new MemoryClientIdStore(),
     onInvalidCredentials: () => {
       invalidations++;
     },
@@ -556,10 +638,13 @@ test("stored credentials are bound to the configured OAuth client", async () => 
 test("invalid refresh scope removes prior credentials and closes the session", async () => {
   const store = new MemoryCredentialStore();
   store.credentials = { ...credentials, expiresAt: 0 };
+  const clientIdStore = new MemoryClientIdStore();
+  clientIdStore.clientId = credentials.clientId;
   let invalidations = 0;
   const auth = new SlackAuth({
     config,
     store,
+    clientIdStore,
     now: () => 10_000,
     onInvalidCredentials: () => {
       invalidations++;
@@ -579,6 +664,7 @@ test("invalid refresh scope removes prior credentials and closes the session", a
   await assert.rejects(auth.getAccessGrant(), /unapproved OAuth scope set/);
   assert.equal(store.credentials, undefined);
   assert.equal(store.deletes, 1);
+  assert.equal(clientIdStore.clientId, credentials.clientId);
   assert.equal(invalidations, 1);
 });
 
@@ -636,6 +722,30 @@ test("Slack initialize requests use the protocol version accepted by the hosted 
   const pinned = pinSlackProtocolVersion(original);
   assert.equal(pinned.params.protocolVersion, "2025-06-18");
   assert.equal(original.params.protocolVersion, "2025-11-25");
+});
+
+test("Slack tool errors explain when interactive authentication is required", async () => {
+  const fakeAuth = {
+    revision: 0,
+    async getAccessGrant() {
+      throw new Error("Slack is not authenticated. Run /slack-login in the TUI.");
+    },
+  } as unknown as SlackAuth;
+  let connectionCreations = 0;
+  const client = new SlackMcpClient({
+    auth: fakeAuth,
+    config,
+    connectionFactory: () => {
+      connectionCreations++;
+      return new FakeConnection();
+    },
+  });
+
+  await assert.rejects(
+    client.call("readThread", { channel_id: "C1", message_ts: "1.2", limit: 1 }),
+    /Run \/slack-login in the TUI/,
+  );
+  assert.equal(connectionCreations, 0);
 });
 
 test("parallel first calls initialize one client and dispatch only fixed names", async () => {

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { isIP } from "node:net";
-import type { CredentialStore } from "./credentials.ts";
+import type { ClientIdStore, CredentialStore } from "./credentials.ts";
 import {
   SLACK_AUTHORIZATION_ENDPOINT,
   SLACK_MCP_RESOURCE,
@@ -16,6 +16,7 @@ import {
   type SlackConfig,
   type SlackCredentials,
   type SlackIdentity,
+  isValidSlackClientId,
 } from "./types.ts";
 
 const AUTHORIZATION_METADATA_URL = `${SLACK_OAUTH_ISSUER}/.well-known/oauth-authorization-server`;
@@ -39,9 +40,24 @@ interface TokenResponse {
   tokenType?: unknown;
 }
 
+class SlackTokenRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SlackTokenRejectedError";
+  }
+}
+
+class SlackTokenValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SlackTokenValidationError";
+  }
+}
+
 export interface SlackAuthOptions {
   config: SlackConfig;
   store: CredentialStore;
+  clientIdStore: ClientIdStore;
   fetch?: typeof fetch;
   openBrowser?: BrowserOpener;
   now?: () => number;
@@ -76,6 +92,7 @@ class SerialLock {
 export class SlackAuth {
   private readonly config: SlackConfig;
   private readonly store: CredentialStore;
+  private readonly clientIdStore: ClientIdStore;
   private readonly fetchImpl: typeof fetch;
   private readonly browser: BrowserOpener;
   private readonly now: () => number;
@@ -93,6 +110,7 @@ export class SlackAuth {
   constructor(options: SlackAuthOptions) {
     this.config = options.config;
     this.store = options.store;
+    this.clientIdStore = options.clientIdStore;
     this.fetchImpl = options.fetch ?? fetch;
     this.browser = options.openBrowser ?? openBrowser;
     this.now = options.now ?? Date.now;
@@ -107,6 +125,10 @@ export class SlackAuth {
     return this.loginController !== undefined;
   }
 
+  async hasClientId(): Promise<boolean> {
+    return (await this.configuredClientId()) !== undefined;
+  }
+
   async status(): Promise<SlackAuthStatus> {
     const credentials = await this.load();
     return credentials
@@ -119,7 +141,7 @@ export class SlackAuth {
       : { authenticated: false };
   }
 
-  async login(): Promise<SlackCredentials> {
+  async login(providedClientId?: string): Promise<SlackCredentials> {
     if (this.loginController) throw new Error("A Slack login is already in progress.");
 
     const controller = new AbortController();
@@ -136,11 +158,7 @@ export class SlackAuth {
       if (await this.load()) {
         throw new Error("Slack is already authenticated. Run /slack-logout first.");
       }
-      if (!this.config.clientId) {
-        throw new Error(
-          "Set SLACK_MCP_CLIENT_ID to the organization's public Slack app client ID.",
-        );
-      }
+      const loginConfig = await this.configForLogin(providedClientId);
       flowSignal.throwIfAborted();
       const metadata = await discoverOAuthMetadata(this.fetchImpl, flowSignal);
       const verifier = createPkceVerifier();
@@ -148,7 +166,7 @@ export class SlackAuth {
       const state = randomBytes(32).toString("base64url");
       const authorizationUrl = createAuthorizationUrl(
         metadata.authorization,
-        this.config,
+        loginConfig,
         state,
         challenge,
       );
@@ -162,12 +180,12 @@ export class SlackAuth {
       const token = await exchangeAuthorizationCode(
         this.fetchImpl,
         metadata.authorization,
-        this.config,
+        loginConfig,
         code,
         verifier,
         flowSignal,
       );
-      const credentials = validateInitialToken(token, this.config, this.now());
+      const credentials = validateInitialToken(token, loginConfig, this.now());
 
       await this.transitionLock.run(async () => {
         if (flowSignal.aborted || loginGeneration !== this.generation) {
@@ -175,6 +193,7 @@ export class SlackAuth {
             deadline.aborted ? "Slack login timed out." : "Slack login was cancelled.",
           );
         }
+        await this.clientIdStore.save(credentials.clientId);
         credentialWriteAttempted = true;
         await this.store.save(credentials);
         if (flowSignal.aborted || loginGeneration !== this.generation) {
@@ -264,12 +283,18 @@ export class SlackAuth {
       .load()
       .then(async (credentials) => {
         if (credentials) {
+          const storedClientId = await this.clientIdStore.load();
+          const configuredClientId = this.config.clientId || storedClientId;
+          const validationConfig = configuredClientId
+            ? { ...this.config, clientId: configuredClientId }
+            : this.config;
           try {
-            validateStoredCredentials(credentials, this.config);
+            validateStoredCredentials(credentials, validationConfig);
           } catch {
             await this.invalidate();
             throw new Error("Stored Slack credentials failed security validation.");
           }
+          if (!storedClientId) await this.clientIdStore.save(credentials.clientId);
         }
         this.credentials = credentials;
         this.loaded = true;
@@ -279,6 +304,30 @@ export class SlackAuth {
         this.loadFlight = undefined;
       });
     return this.loadFlight;
+  }
+
+  private async configuredClientId(): Promise<string | undefined> {
+    return this.config.clientId || (await this.clientIdStore.load());
+  }
+
+  private async configForLogin(providedClientId?: string): Promise<SlackConfig> {
+    const provided = providedClientId?.trim();
+    if (provided && !isValidSlackClientId(provided)) {
+      throw new Error("Slack client ID is invalid.");
+    }
+    if (provided && this.config.clientId && provided !== this.config.clientId) {
+      throw new Error("Slack client ID does not match SLACK_MCP_CLIENT_ID.");
+    }
+    const clientId = this.config.clientId || provided || (await this.clientIdStore.load());
+    if (!clientId) {
+      throw new Error("Enter the organization's public Slack app client ID.");
+    }
+    return { ...this.config, clientId };
+  }
+
+  private async configForStoredCredentials(credentials: SlackCredentials): Promise<SlackConfig> {
+    const clientId = (await this.configuredClientId()) ?? credentials.clientId;
+    return { ...this.config, clientId };
   }
 
   private async refresh(
@@ -296,17 +345,33 @@ export class SlackAuth {
     const refreshGeneration = this.generation;
     this.refreshFlight = (async () => {
       const requestSignal = combinedSignal(signal, this.config.requestTimeoutMs);
+      let invalidateCredentials = false;
       try {
         const metadata = await discoverOAuthMetadata(this.fetchImpl, requestSignal);
-        const effectiveConfig = configForStoredCredentials(this.config, current);
-        const token = await refreshAccessToken(
-          this.fetchImpl,
-          metadata.authorization,
-          effectiveConfig,
-          current.refreshToken!,
-          requestSignal,
-        );
-        const refreshed = validateRefreshedToken(token, current, effectiveConfig, this.now());
+        const effectiveConfig = await this.configForStoredCredentials(current);
+        let token: TokenResponse;
+        try {
+          token = await refreshAccessToken(
+            this.fetchImpl,
+            metadata.authorization,
+            effectiveConfig,
+            current.refreshToken!,
+            requestSignal,
+          );
+        } catch (error) {
+          invalidateCredentials =
+            error instanceof SlackTokenRejectedError || error instanceof SlackTokenValidationError;
+          throw error;
+        }
+
+        let refreshed: SlackCredentials;
+        try {
+          refreshed = validateRefreshedToken(token, current, effectiveConfig, this.now());
+          invalidateCredentials = true;
+        } catch (error) {
+          invalidateCredentials = true;
+          throw error;
+        }
         await this.transitionLock.run(async () => {
           if (refreshGeneration !== this.generation) {
             throw new Error("Slack authentication changed while refreshing.");
@@ -326,9 +391,13 @@ export class SlackAuth {
         if (refreshGeneration !== this.generation) {
           throw new Error("Slack authentication changed while refreshing.");
         }
-        await this.invalidate();
+        if (invalidateCredentials) await this.invalidate();
         if (isSafeOAuthError(error)) throw error;
-        throw new Error("Slack credentials could not be refreshed and were removed.");
+        throw new Error(
+          invalidateCredentials
+            ? "Slack credentials could not be refreshed and were removed."
+            : "Slack credentials could not be refreshed. Retry later.",
+        );
       }
     })().finally(() => {
       this.refreshFlight = undefined;
@@ -491,83 +560,96 @@ async function requestToken(
   }
   const value = await responseJson(response);
   if (!response.ok || !isRecord(value) || value.ok !== true) {
+    if (response.status === 429 || response.status >= 500) {
+      throw new Error("Slack's token endpoint is temporarily unavailable. Retry later.");
+    }
     const error = isRecord(value) && typeof value.error === "string" ? value.error : undefined;
     if (error === "bad_client_secret" || error === "invalid_client_id") {
-      throw new Error(
+      throw new SlackTokenRejectedError(
         "Slack rejected the public PKCE client. Verify that the app has PKCE enabled; do not add a client secret to this repository.",
       );
     }
-    throw new Error("Slack rejected the OAuth token request.");
+    throw new SlackTokenRejectedError("Slack rejected the OAuth token request.");
   }
 
-  const authedUser = isRecord(value.authed_user) ? value.authed_user : undefined;
-  const user = isRecord(value.user) ? value.user : undefined;
-  const team = isRecord(value.team) ? value.team : undefined;
-  const enterprise = isRecord(value.enterprise) ? value.enterprise : undefined;
-  const topAccessToken = typeof value.access_token === "string" ? value.access_token : undefined;
-  const userAccessToken =
-    typeof authedUser?.access_token === "string" ? authedUser.access_token : undefined;
-  if (topAccessToken && userAccessToken && topAccessToken !== userAccessToken) {
-    throw new Error("Slack returned conflicting user access tokens.");
-  }
-  const tokenRecord = topAccessToken ? value : authedUser;
-  const topTokenType = typeof value.token_type === "string" ? value.token_type : undefined;
-  const userTokenType =
-    typeof authedUser?.token_type === "string" ? authedUser.token_type : undefined;
-  const normalizedTopTokenType = topTokenType?.toLowerCase();
-  const normalizedUserTokenType = userTokenType?.toLowerCase();
-  const bearerUserPair =
-    new Set([normalizedTopTokenType, normalizedUserTokenType]).size === 2 &&
-    [normalizedTopTokenType, normalizedUserTokenType].every(
-      (tokenType) => tokenType === "bearer" || tokenType === "user",
+  try {
+    const authedUser = isRecord(value.authed_user) ? value.authed_user : undefined;
+    const user = isRecord(value.user) ? value.user : undefined;
+    const team = isRecord(value.team) ? value.team : undefined;
+    const enterprise = isRecord(value.enterprise) ? value.enterprise : undefined;
+    const topAccessToken = typeof value.access_token === "string" ? value.access_token : undefined;
+    const userAccessToken =
+      typeof authedUser?.access_token === "string" ? authedUser.access_token : undefined;
+    if (topAccessToken && userAccessToken && topAccessToken !== userAccessToken) {
+      throw new Error("Slack returned conflicting user access tokens.");
+    }
+    const tokenRecord = topAccessToken ? value : authedUser;
+    const topTokenType = typeof value.token_type === "string" ? value.token_type : undefined;
+    const userTokenType =
+      typeof authedUser?.token_type === "string" ? authedUser.token_type : undefined;
+    const normalizedTopTokenType = topTokenType?.toLowerCase();
+    const normalizedUserTokenType = userTokenType?.toLowerCase();
+    const bearerUserPair =
+      new Set([normalizedTopTokenType, normalizedUserTokenType]).size === 2 &&
+      [normalizedTopTokenType, normalizedUserTokenType].every(
+        (tokenType) => tokenType === "bearer" || tokenType === "user",
+      );
+    if (topTokenType && userTokenType && topTokenType !== userTokenType && !bearerUserPair) {
+      throw new Error("Slack returned conflicting access-token types.");
+    }
+    const tokenType =
+      normalizedTopTokenType === "user" || normalizedUserTokenType === "user"
+        ? "user"
+        : (topTokenType ?? userTokenType);
+    const accessToken = topAccessToken ?? userAccessToken ?? "";
+    validateUserAccessToken(accessToken, tokenType);
+
+    const topScopes = parseOptionalScopes(value.scope);
+    const userScopes = parseOptionalScopes(authedUser?.scope);
+    const scopes = topAccessToken ? (topScopes ?? userScopes) : userScopes;
+    const teamId = firstString(team?.id, value.team_id, authedUser?.team_id, value.team);
+    const enterpriseId = firstString(
+      enterprise?.id,
+      value.enterprise_id,
+      authedUser?.enterprise_id,
     );
-  if (topTokenType && userTokenType && topTokenType !== userTokenType && !bearerUserPair) {
-    throw new Error("Slack returned conflicting access-token types.");
+    const userId = firstString(
+      authedUser?.id,
+      value.authed_user_id,
+      value.user_id,
+      user?.id,
+      value.authed_user,
+    );
+    const returnedIdentity: Partial<SlackIdentity> = {
+      ...(teamId ? { teamId } : {}),
+      ...(enterpriseId ? { enterpriseId } : {}),
+      ...(userId ? { userId } : {}),
+    };
+    const identity =
+      returnedIdentity.teamId && returnedIdentity.userId
+        ? returnedIdentity
+        : body.get("grant_type") === "authorization_code"
+          ? mergeReturnedIdentity(
+              returnedIdentity,
+              await verifySlackAccessTokenIdentity(fetchImpl, accessToken, signal),
+            )
+          : returnedIdentity;
+
+    return {
+      accessToken,
+      ...(typeof tokenRecord?.refresh_token === "string"
+        ? { refreshToken: tokenRecord.refresh_token }
+        : {}),
+      ...(typeof tokenRecord?.expires_in === "number" ? { expiresIn: tokenRecord.expires_in } : {}),
+      ...(scopes ? { scopes } : {}),
+      identity,
+      tokenType,
+    };
+  } catch (error) {
+    throw new SlackTokenValidationError(
+      isSafeOAuthError(error) ? error.message : "Slack returned a malformed OAuth token response.",
+    );
   }
-  const tokenType =
-    normalizedTopTokenType === "user" || normalizedUserTokenType === "user"
-      ? "user"
-      : (topTokenType ?? userTokenType);
-  const accessToken = topAccessToken ?? userAccessToken ?? "";
-  validateUserAccessToken(accessToken, tokenType);
-
-  const topScopes = parseOptionalScopes(value.scope);
-  const userScopes = parseOptionalScopes(authedUser?.scope);
-  const scopes = topAccessToken ? (topScopes ?? userScopes) : userScopes;
-  const teamId = firstString(team?.id, value.team_id, authedUser?.team_id, value.team);
-  const enterpriseId = firstString(enterprise?.id, value.enterprise_id, authedUser?.enterprise_id);
-  const userId = firstString(
-    authedUser?.id,
-    value.authed_user_id,
-    value.user_id,
-    user?.id,
-    value.authed_user,
-  );
-  const returnedIdentity: Partial<SlackIdentity> = {
-    ...(teamId ? { teamId } : {}),
-    ...(enterpriseId ? { enterpriseId } : {}),
-    ...(userId ? { userId } : {}),
-  };
-  const identity =
-    returnedIdentity.teamId && returnedIdentity.userId
-      ? returnedIdentity
-      : body.get("grant_type") === "authorization_code"
-        ? mergeReturnedIdentity(
-            returnedIdentity,
-            await verifySlackAccessTokenIdentity(fetchImpl, accessToken, signal),
-          )
-        : returnedIdentity;
-
-  return {
-    accessToken,
-    ...(typeof tokenRecord?.refresh_token === "string"
-      ? { refreshToken: tokenRecord.refresh_token }
-      : {}),
-    ...(typeof tokenRecord?.expires_in === "number" ? { expiresIn: tokenRecord.expires_in } : {}),
-    ...(scopes ? { scopes } : {}),
-    identity,
-    tokenType,
-  };
 }
 
 export function validateInitialToken(
@@ -769,13 +851,6 @@ function validateStoredCredentials(credentials: SlackCredentials, config: SlackC
   validateIdentity(credentials.identity, undefined, config);
 }
 
-function configForStoredCredentials(
-  config: SlackConfig,
-  credentials: SlackCredentials,
-): SlackConfig {
-  return config.clientId ? config : { ...config, clientId: credentials.clientId };
-}
-
 function validateUserAccessToken(accessToken: string, tokenType: unknown): void {
   if (
     accessToken.length === 0 ||
@@ -970,6 +1045,7 @@ function isSafeOAuthError(error: unknown): error is Error {
   return (
     error instanceof Error &&
     (error.message.startsWith("Slack ") ||
+      error.message.startsWith("Slack's ") ||
       error.message.startsWith("Set SLACK_") ||
       error.message.startsWith("The OS credential store") ||
       error.message.startsWith("Stored Slack") ||

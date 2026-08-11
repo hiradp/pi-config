@@ -1,7 +1,8 @@
-import { SLACK_SCOPES, type SlackCredentials } from "./types.ts";
+import { isValidSlackClientId, SLACK_SCOPES, type SlackCredentials } from "./types.ts";
 
 const KEYRING_SERVICE = "pi-slack-mcp";
-const KEYRING_ACCOUNT = "read-only-oauth";
+const CREDENTIAL_ACCOUNT = "read-only-oauth";
+const CLIENT_ID_ACCOUNT = "public-client-id";
 const ALLOWED_SCOPES = new Set<string>(SLACK_SCOPES);
 
 export interface CredentialStore {
@@ -10,8 +11,14 @@ export interface CredentialStore {
   delete(): Promise<void>;
 }
 
+export interface ClientIdStore {
+  load(): Promise<string | undefined>;
+  save(clientId: string): Promise<void>;
+  delete(): Promise<void>;
+}
+
 interface KeyringEntry {
-  getPassword(signal?: AbortSignal): Promise<string | undefined>;
+  getPassword(signal?: AbortSignal): Promise<string | null | undefined>;
   setPassword(password: string, signal?: AbortSignal): Promise<void>;
   deletePassword(signal?: AbortSignal): Promise<unknown>;
 }
@@ -23,17 +30,24 @@ export class CredentialStoreError extends Error {
   }
 }
 
+export class ClientIdStoreError extends Error {
+  constructor(operation: "read" | "write" | "delete") {
+    super(`The OS credential store could not ${operation} Slack client configuration.`);
+    this.name = "ClientIdStoreError";
+  }
+}
+
 export class OsCredentialStore implements CredentialStore {
   private entryPromise?: Promise<KeyringEntry>;
 
   async load(): Promise<SlackCredentials | undefined> {
-    let serialized: string | undefined;
+    let serialized: string | null | undefined;
     try {
       serialized = await (await this.entry()).getPassword();
     } catch {
       throw new CredentialStoreError("read");
     }
-    if (serialized === undefined) return undefined;
+    if (serialized == null) return undefined;
 
     const credentials = parseCredentials(serialized);
     if (!credentials) {
@@ -61,9 +75,56 @@ export class OsCredentialStore implements CredentialStore {
 
   private entry(): Promise<KeyringEntry> {
     this.entryPromise ??= import("@napi-rs/keyring")
-      .then(({ AsyncEntry }) => new AsyncEntry(KEYRING_SERVICE, KEYRING_ACCOUNT))
+      .then(({ AsyncEntry }) => new AsyncEntry(KEYRING_SERVICE, CREDENTIAL_ACCOUNT))
       .catch(() => {
         throw new CredentialStoreError("read");
+      });
+    return this.entryPromise;
+  }
+}
+
+export class OsClientIdStore implements ClientIdStore {
+  private entryPromise?: Promise<KeyringEntry>;
+
+  async load(): Promise<string | undefined> {
+    let clientId: string | null | undefined;
+    try {
+      clientId = await (await this.entry()).getPassword();
+    } catch {
+      throw new ClientIdStoreError("read");
+    }
+    if (clientId == null) return undefined;
+
+    const trimmed = clientId.trim();
+    if (!isValidSlackClientId(trimmed)) {
+      await this.delete();
+      return undefined;
+    }
+    return trimmed;
+  }
+
+  async save(clientId: string): Promise<void> {
+    if (!isValidSlackClientId(clientId)) throw new Error("Slack client ID is invalid.");
+    try {
+      await (await this.entry()).setPassword(clientId);
+    } catch {
+      throw new ClientIdStoreError("write");
+    }
+  }
+
+  async delete(): Promise<void> {
+    try {
+      await (await this.entry()).deletePassword();
+    } catch {
+      throw new ClientIdStoreError("delete");
+    }
+  }
+
+  private entry(): Promise<KeyringEntry> {
+    this.entryPromise ??= import("@napi-rs/keyring")
+      .then(({ AsyncEntry }) => new AsyncEntry(KEYRING_SERVICE, CLIENT_ID_ACCOUNT))
+      .catch(() => {
+        throw new ClientIdStoreError("read");
       });
     return this.entryPromise;
   }
@@ -92,6 +153,33 @@ export class MemoryCredentialStore implements CredentialStore {
     this.deletes++;
     if (this.fail === "delete") throw new CredentialStoreError("delete");
     this.credentials = undefined;
+  }
+}
+
+export class MemoryClientIdStore implements ClientIdStore {
+  clientId?: string;
+  fail?: "read" | "write" | "delete";
+  reads = 0;
+  writes = 0;
+  deletes = 0;
+
+  async load(): Promise<string | undefined> {
+    this.reads++;
+    if (this.fail === "read") throw new ClientIdStoreError("read");
+    return this.clientId;
+  }
+
+  async save(clientId: string): Promise<void> {
+    this.writes++;
+    if (this.fail === "write") throw new ClientIdStoreError("write");
+    if (!isValidSlackClientId(clientId)) throw new Error("Slack client ID is invalid.");
+    this.clientId = clientId;
+  }
+
+  async delete(): Promise<void> {
+    this.deletes++;
+    if (this.fail === "delete") throw new ClientIdStoreError("delete");
+    this.clientId = undefined;
   }
 }
 

@@ -6,7 +6,12 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { SlackMcpClient, type McpConnectionFactory } from "./client.ts";
-import { OsCredentialStore, type CredentialStore } from "./credentials.ts";
+import {
+  OsClientIdStore,
+  OsCredentialStore,
+  type ClientIdStore,
+  type CredentialStore,
+} from "./credentials.ts";
 import { formatSlackResult } from "./format.ts";
 import { SlackAuth, type BrowserOpener } from "./oauth.ts";
 import {
@@ -32,6 +37,7 @@ import { loadSlackConfig, type SlackConfig, type SlackToolMetadata } from "./typ
 export interface SlackExtensionOptions {
   config?: SlackConfig;
   store?: CredentialStore;
+  clientIdStore?: ClientIdStore;
   fetch?: typeof fetch;
   openBrowser?: BrowserOpener;
   connectionFactory?: McpConnectionFactory;
@@ -44,10 +50,12 @@ export function registerSlackExtension(
 ): void {
   const config = options.config ?? loadSlackConfig();
   const store = options.store ?? new OsCredentialStore();
+  const clientIdStore = options.clientIdStore ?? new OsClientIdStore();
   let client: SlackMcpClient;
   const auth = new SlackAuth({
     config,
     store,
+    clientIdStore,
     fetch: options.fetch,
     openBrowser: options.openBrowser,
     now: options.now,
@@ -87,7 +95,18 @@ function registerCommands(pi: ExtensionAPI, auth: SlackAuth, client: SlackMcpCli
           ctx.ui.notify("Slack is already authenticated. Run /slack-logout first.", "error");
           return;
         }
-        const credentials = await auth.login();
+        let clientId: string | undefined;
+        if (!(await auth.hasClientId())) {
+          clientId = await ctx.ui.input(
+            "Slack app client ID",
+            "Public client ID from the Slack app",
+          );
+          if (!clientId?.trim()) {
+            ctx.ui.notify("Slack login cancelled.", "info");
+            return;
+          }
+        }
+        const credentials = await auth.login(clientId);
         ctx.ui.notify(
           `Authenticated Slack user ${credentials.identity.userId} in team ${credentials.identity.teamId}.`,
           "info",
@@ -131,7 +150,7 @@ function registerCommands(pi: ExtensionAPI, auth: SlackAuth, client: SlackMcpCli
         const removed = await auth.logout();
         ctx.ui.notify(
           removed
-            ? "Slack credentials were removed locally. The Slack grant was not revoked."
+            ? "Slack credentials were removed locally. The public client ID was retained for future login. The Slack grant was not revoked."
             : "Slack was not authenticated.",
           "info",
         );

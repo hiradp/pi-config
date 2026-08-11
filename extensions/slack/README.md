@@ -15,13 +15,14 @@ Use a dedicated internal Slack app (or a directory-published app) that Slack per
 
 1. Enable **Slack Model Context Protocol (MCP) Server** in the app's Agents settings.
 2. Enable PKCE. Slack treats a PKCE-enabled `localhost` redirect as a public desktop client.
-3. Register exactly this redirect URI:
+3. Enable token rotation so Slack can issue refresh tokens for unattended renewal.
+4. Register exactly this redirect URI:
 
    ```text
    http://localhost:3118/callback
    ```
 
-4. Add only these user scopes:
+5. Add only these user scopes:
 
    ```text
    search:read.public
@@ -35,25 +36,9 @@ Use a dedicated internal Slack app (or a directory-published app) that Slack per
    mpim:history
    ```
 
-5. Make the public, non-secret client ID available only for the initial login. To keep the value out of shell history and tracked configuration, prompt for it in `zsh` and pass it only to that Pi process:
+6. Run `/slack-login`. On first use, Pi prompts for the public, non-secret client ID from the Slack app. It stores that ID separately from the OAuth credentials in the OS keyring, so token expiry, refresh failure, and `/slack-logout` do not forget the app configuration.
 
-   ```sh
-   read -rs "SLACK_MCP_CLIENT_ID?Slack client ID: "
-   printf '\n'
-   SLACK_MCP_CLIENT_ID="$SLACK_MCP_CLIENT_ID" pi --no-session
-   unset SLACK_MCP_CLIENT_ID
-   ```
-
-   For `fish`:
-
-   ```fish
-   read --silent --prompt-str 'Slack client ID: ' SLACK_MCP_CLIENT_ID
-   echo
-   env SLACK_MCP_CLIENT_ID="$SLACK_MCP_CLIENT_ID" pi --no-session
-   set --erase SLACK_MCP_CLIENT_ID
-   ```
-
-   Run `/slack-login` in that Pi process. Validated credentials include the client ID and are stored together in the OS keyring. Later normal `pi` invocations use that keyring-bound client ID and do not require the environment variable. Supplying the variable again acts as an explicit client-ID pin; a mismatch invalidates the stored credentials.
+   `SLACK_MCP_CLIENT_ID` remains available as an optional explicit client-ID pin. A mismatch invalidates OAuth credentials from a different app.
 
 For a directory-published app, pin the expected identity as appropriate:
 
@@ -68,10 +53,10 @@ The extension does not accept or store a client secret. Slack's OAuth metadata c
 
 - `/slack-login` starts a browser-based PKCE flow. It works only in TUI mode while Pi is idle and refuses to replace existing credentials.
 - `/slack-status` shows the verified team/user identity, expiration, and exact effective scopes without showing tokens.
-- `/slack-logout` closes the MCP session and removes credentials from the OS credential store. It does **not** revoke the Slack grant or uninstall the app.
+- `/slack-logout` closes the MCP session and removes OAuth credentials from the OS credential store. It retains the public client ID for future login and does **not** revoke the Slack grant or uninstall the app.
 - `/slack-discover` displays sanitized live MCP tool names, annotations, and input schemas for development review. It is a user command and is never available to the model.
 
-Credentials are stored only in the operating system credential store through `@napi-rs/keyring`. There is no plaintext fallback.
+OAuth credentials and the public client ID are stored as separate entries in the operating system credential store through `@napi-rs/keyring`. There is no plaintext fallback.
 
 ## Read-only boundary
 
@@ -91,11 +76,18 @@ pi --no-session
 
 when Slack content must not be retained in a Pi session. The extension has no separate Slack cache.
 
+## Reliability
+
+When Slack supplies a refresh token, the extension rotates credentials automatically before expiry. A transient metadata, network, rate-limit, or Slack service failure leaves the credentials intact so a later read can retry. OAuth rejection or a failed security validation still removes unusable credentials.
+
+No OAuth client can guarantee permanent unattended access. `/slack-login` is still required if Slack omits a refresh token, the grant is revoked, workspace policy requires reauthorization, or SSO demands user interaction. The separately stored client ID makes that a direct browser login instead of another environment-variable setup.
+
 ## Troubleshooting
 
-- **Not authenticated:** provide `SLACK_MCP_CLIENT_ID` to that process and run `/slack-login` directly in the TUI. A model tool can never open a browser. After login, normal invocations read the client ID from the keyring-backed credentials.
+- **Not authenticated:** run `/slack-login` directly in the TUI. Pi prompts for the public client ID only if it has never stored one. A model tool can never open a browser.
 - **Public PKCE client rejected:** confirm PKCE is enabled and the callback URI is an exact match. Do not add a client secret.
 - **Scope validation failed:** remove extra user scopes from the app, then run `/slack-logout` and `/slack-login`.
-- **Authentication expires after about an hour:** Slack MCP may return an expiring access token without a refresh token. Run `/slack-login` again; the extension will not invent a refresh credential.
+- **Authentication expires:** enable token rotation in the Slack app and run `/slack-login` again. If Slack still omits a refresh token, browser reauthorization cannot be automated safely.
+- **Temporary refresh failure:** retry the Slack read later; transient failures no longer delete credentials.
 - **Approved tool unavailable or incompatible:** run `/slack-discover`, compare the live schema with `tools.ts`, and review Slack's change before updating the contract.
 - **Credential store unavailable:** fix access to the OS keyring. The extension will not fall back to a file.

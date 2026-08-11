@@ -383,12 +383,27 @@ function isApprovedToolError(error: unknown): boolean {
 
 function sanitizedCallError(error: unknown, fallback = "Slack read failed."): Error {
   if (error instanceof Error) {
-    if (isApprovedToolError(error)) return new Error(error.message);
+    if (isApprovedToolError(error) || isActionableAuthError(error.message)) {
+      return new Error(error.message);
+    }
     if (error.name === "AbortError" || error.message.toLowerCase().includes("cancel")) {
       return new Error("Slack request was cancelled.");
     }
   }
   return new Error(fallback);
+}
+
+function isActionableAuthError(message: string): boolean {
+  return [
+    "Slack is not authenticated.",
+    "Slack authentication expired.",
+    "Slack credentials could not be refreshed",
+    "Slack OAuth metadata could not",
+    "Slack's token endpoint",
+    "Slack rejected the OAuth token request.",
+    "Stored Slack credentials",
+    "The OS credential store",
+  ].some((prefix) => message.startsWith(prefix));
 }
 
 function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
