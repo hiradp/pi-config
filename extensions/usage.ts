@@ -21,8 +21,6 @@ import {
 
 const PERIOD_KEYS = ["day", "week", "month"] as const;
 const TREND_KEYS = ["daily7", "weekly30"] as const;
-const UNATTRIBUTED_PROVIDER = "Unattributed";
-const UNATTRIBUTED_MODEL = "Tools / summaries";
 
 export type UsagePeriodKey = (typeof PERIOD_KEYS)[number];
 export type UsageTrendKey = (typeof TREND_KEYS)[number];
@@ -35,9 +33,13 @@ export interface UsageTotals {
   cost: number;
 }
 
+export type UsageCategory = "primary" | "delegated" | "overhead" | "tool";
+
 export interface ModelUsage extends UsageTotals {
+  category: UsageCategory;
   provider: string;
   model: string;
+  source?: string;
 }
 
 export interface PeriodUsage {
@@ -65,8 +67,10 @@ export interface UsageReport {
 
 interface UsageEvent {
   timestamp: number;
+  category: UsageCategory;
   provider: string;
   model: string;
+  source?: string;
   usage: UsageTotals;
   fingerprint: string;
 }
@@ -87,8 +91,8 @@ interface LoadUsageOptions {
 
 interface DisplayUsageRow {
   label: string;
-  totals: UsageTotals;
-  provider: boolean;
+  totals?: UsageTotals;
+  heading: boolean;
 }
 
 interface TableColumn {
@@ -148,72 +152,121 @@ function fingerprint(parts: unknown[]): string {
   return createHash("sha256").update(JSON.stringify(parts)).digest("base64url");
 }
 
-function eventFromEntry(entry: SessionEntry): UsageEvent | null {
-  if (entry.type === "message" && entry.message.role === "assistant") {
-    const message = entry.message;
-    const usage = normalizeUsage(message.usage);
-    const timestamp = entryTimestamp(entry, message.timestamp);
-    if (!usage || timestamp === null) return null;
+function assistantEvent(
+  entry: SessionEntry,
+  message: Record<string, unknown>,
+  source?: string,
+): UsageEvent | null {
+  const usage = normalizeUsage(message.usage as Usage | undefined);
+  const messageTimestamp =
+    typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+      ? message.timestamp
+      : undefined;
+  const timestamp = entryTimestamp(entry, messageTimestamp);
+  if (!usage || timestamp === null) return null;
 
-    const provider = message.provider || "Unknown";
-    const model = message.responseModel || message.model || "unknown";
-    return {
-      timestamp,
+  const provider =
+    typeof message.provider === "string" && message.provider ? message.provider : "Unknown";
+  const requestedModel =
+    typeof message.model === "string" && message.model ? message.model : "unknown";
+  const model =
+    typeof message.responseModel === "string" && message.responseModel
+      ? message.responseModel
+      : requestedModel;
+  return {
+    timestamp,
+    category: source ? "delegated" : "primary",
+    provider,
+    model,
+    ...(source ? { source } : {}),
+    usage,
+    fingerprint: fingerprint([
+      "assistant",
+      source,
+      entry.timestamp,
+      message.timestamp,
+      message.responseId,
       provider,
-      model,
-      usage,
-      fingerprint: fingerprint([
-        "assistant",
-        entry.timestamp,
-        message.timestamp,
-        message.responseId,
-        provider,
-        message.model,
-        message.responseModel,
-        message.usage,
-        message.content,
-      ]),
-    };
+      requestedModel,
+      message.responseModel,
+      message.usage,
+      message.content,
+    ]),
+  };
+}
+
+function porterEvents(entry: SessionEntry): UsageEvent[] {
+  if (entry.type !== "message" || entry.message.role !== "toolResult") return [];
+  if (entry.message.toolName !== "porter") return [];
+
+  const details = entry.message.details;
+  if (typeof details !== "object" || details === null || !("messages" in details)) return [];
+  const messages = (details as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return [];
+
+  return messages.flatMap((message) => {
+    if (typeof message !== "object" || message === null || !("role" in message)) return [];
+    if ((message as { role?: unknown }).role !== "assistant") return [];
+    const event = assistantEvent(entry, message as Record<string, unknown>, "Porter");
+    return event ? [event] : [];
+  });
+}
+
+function eventsFromEntry(entry: SessionEntry): UsageEvent[] {
+  if (entry.type === "message" && entry.message.role === "assistant") {
+    const event = assistantEvent(entry, entry.message as unknown as Record<string, unknown>);
+    return event ? [event] : [];
   }
 
   if (entry.type === "message" && entry.message.role === "toolResult") {
+    const nestedEvents = porterEvents(entry);
+    if (nestedEvents.length > 0) return nestedEvents;
+
     const message = entry.message;
     const usage = normalizeUsage(message.usage);
     const timestamp = entryTimestamp(entry, message.timestamp);
-    if (!usage || timestamp === null) return null;
+    if (!usage || timestamp === null) return [];
 
-    return {
-      timestamp,
-      provider: UNATTRIBUTED_PROVIDER,
-      model: UNATTRIBUTED_MODEL,
-      usage,
-      fingerprint: fingerprint([
-        "toolResult",
-        entry.timestamp,
-        message.timestamp,
-        message.toolCallId,
-        message.toolName,
-        message.usage,
-        message.content,
-      ]),
-    };
+    return [
+      {
+        timestamp,
+        category: "tool",
+        provider: "",
+        model: "",
+        source: message.toolName || "unknown",
+        usage,
+        fingerprint: fingerprint([
+          "toolResult",
+          entry.timestamp,
+          message.timestamp,
+          message.toolCallId,
+          message.toolName,
+          message.usage,
+          message.content,
+        ]),
+      },
+    ];
   }
 
   if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage) {
     const usage = normalizeUsage(entry.usage);
     const timestamp = entryTimestamp(entry);
-    if (!usage || timestamp === null) return null;
+    if (!usage || timestamp === null) return [];
 
-    return {
-      timestamp,
-      provider: UNATTRIBUTED_PROVIDER,
-      model: UNATTRIBUTED_MODEL,
-      usage,
-      fingerprint: fingerprint([entry.type, entry.timestamp, entry.usage, entry.summary]),
-    };
+    return [
+      {
+        timestamp,
+        category: "overhead",
+        provider: "",
+        model: "",
+        source: entry.type === "compaction" ? "Compaction" : "Branch summary",
+        usage,
+        fingerprint: fingerprint([entry.type, entry.timestamp, entry.usage, entry.summary]),
+      },
+    ];
   }
 
-  return null;
+  return [];
 }
 
 function localDayStart(date: Date): number {
@@ -270,10 +323,16 @@ function mutablePeriod(key: UsagePeriodKey, start: number): MutablePeriodUsage {
 function addEvent(period: MutablePeriodUsage, event: UsageEvent): void {
   addTotals(period.totals, event.usage);
 
-  const modelKey = JSON.stringify([event.provider, event.model]);
+  const modelKey = JSON.stringify([event.category, event.source, event.provider, event.model]);
   let model = period.models.get(modelKey);
   if (!model) {
-    model = { provider: event.provider, model: event.model, ...emptyTotals() };
+    model = {
+      category: event.category,
+      provider: event.provider,
+      model: event.model,
+      ...(event.source ? { source: event.source } : {}),
+      ...emptyTotals(),
+    };
     period.models.set(modelKey, model);
   }
   addTotals(model, event.usage);
@@ -286,7 +345,11 @@ function compareUsage(a: UsageTotals, b: UsageTotals): number {
 function finalizePeriod(period: MutablePeriodUsage): PeriodUsage {
   const models = [...period.models.values()].sort(
     (a, b) =>
-      compareUsage(a, b) || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model),
+      compareUsage(a, b) ||
+      a.category.localeCompare(b.category) ||
+      (a.source ?? "").localeCompare(b.source ?? "") ||
+      a.provider.localeCompare(b.provider) ||
+      a.model.localeCompare(b.model),
   );
   return { key: period.key, start: period.start, totals: { ...period.totals }, models };
 }
@@ -315,23 +378,24 @@ export function aggregateUsage(
 
   for (const entries of sessions) {
     for (const entry of entries) {
-      const event = eventFromEntry(entry);
-      if (!event || event.timestamp > generatedAt || event.timestamp < earliestStart) continue;
-      if (seen.has(event.fingerprint)) {
-        deduplicatedEntries++;
-        continue;
-      }
+      for (const event of eventsFromEntry(entry)) {
+        if (event.timestamp > generatedAt || event.timestamp < earliestStart) continue;
+        if (seen.has(event.fingerprint)) {
+          deduplicatedEntries++;
+          continue;
+        }
 
-      seen.add(event.fingerprint);
-      eventCount++;
-      for (const key of PERIOD_KEYS) {
-        if (event.timestamp >= starts[key]) addEvent(mutablePeriods[key], event);
-      }
-      for (const key of TREND_KEYS) {
-        const bucket = trends[key].find(
-          ({ start, endExclusive }) => event.timestamp >= start && event.timestamp < endExclusive,
-        );
-        if (bucket) addTotals(bucket.totals, event.usage);
+        seen.add(event.fingerprint);
+        eventCount++;
+        for (const key of PERIOD_KEYS) {
+          if (event.timestamp >= starts[key]) addEvent(mutablePeriods[key], event);
+        }
+        for (const key of TREND_KEYS) {
+          const bucket = trends[key].find(
+            ({ start, endExclusive }) => event.timestamp >= start && event.timestamp < endExclusive,
+          );
+          if (bucket) addTotals(bucket.totals, event.usage);
+        }
       }
     }
   }
@@ -408,28 +472,36 @@ export function formatUsageCost(cost: number): string {
   return `$${cost.toFixed(digits)}`;
 }
 
-function displayRows(period: PeriodUsage): DisplayUsageRow[] {
-  const providers = new Map<string, { totals: UsageTotals; models: ModelUsage[] }>();
-  for (const model of period.models) {
-    let provider = providers.get(model.provider);
-    if (!provider) {
-      provider = { totals: emptyTotals(), models: [] };
-      providers.set(model.provider, provider);
-    }
-    addTotals(provider.totals, model);
-    provider.models.push(model);
-  }
+export function displayRows(period: PeriodUsage): DisplayUsageRow[] {
+  const categories: { category: UsageCategory; heading: string }[] = [
+    { category: "primary", heading: "Primary models" },
+    { category: "delegated", heading: "Delegated agents" },
+    { category: "overhead", heading: "Session overhead" },
+    { category: "tool", heading: "Tool usage" },
+  ];
 
-  return [...providers.entries()]
-    .sort(
-      ([nameA, a], [nameB, b]) => compareUsage(a.totals, b.totals) || nameA.localeCompare(nameB),
-    )
-    .flatMap(([provider, data]) => [
-      { label: provider, totals: data.totals, provider: true },
-      ...data.models
-        .sort((a, b) => compareUsage(a, b) || a.model.localeCompare(b.model))
-        .map((model) => ({ label: `  ${model.model}`, totals: model, provider: false })),
-    ]);
+  return categories.flatMap(({ category, heading }) => {
+    const rows = period.models
+      .filter((item) => item.category === category)
+      .sort(
+        (a, b) =>
+          compareUsage(a, b) ||
+          (a.source ?? "").localeCompare(b.source ?? "") ||
+          a.provider.localeCompare(b.provider) ||
+          a.model.localeCompare(b.model),
+      )
+      .map((item): DisplayUsageRow => {
+        const identity = [item.provider, item.model].filter(Boolean).join(" / ");
+        const label = item.source
+          ? identity
+            ? `${item.source} · ${identity}`
+            : item.source
+          : identity;
+        return { label: `  ${label}`, totals: item, heading: false };
+      });
+
+    return rows.length > 0 ? [{ label: heading, heading: true }, ...rows] : [];
+  });
 }
 
 function fitCell(value: string, width: number, alignRight = false): string {
@@ -483,15 +555,15 @@ function tableLine(
   const gap = "  ";
   const numericWidth = columns.reduce((sum, column) => sum + column.width, 0);
   const labelWidth = Math.max(1, width - numericWidth - gap.length * columns.length);
-  const label = fitCell(row?.label ?? "Provider / model", labelWidth);
-  const labelText = row?.provider
+  const label = fitCell(row?.label ?? "Source", labelWidth);
+  const labelText = row?.heading
     ? theme.fg("accent", theme.bold(label))
     : theme.fg(row ? "text" : "muted", label);
   const values = columns.map((column) => {
-    const value = row ? column.value(row.totals) : column.title;
+    const value = row?.totals ? column.value(row.totals) : row ? "" : column.title;
     const cell = fitCell(value, column.width, true);
     if (!row) return theme.fg("muted", cell);
-    return theme.fg(row.provider ? "accent" : "dim", row.provider ? theme.bold(cell) : cell);
+    return theme.fg("dim", cell);
   });
   return labelText + values.map((value) => gap + value).join("");
 }

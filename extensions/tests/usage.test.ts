@@ -4,6 +4,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
   aggregateUsage,
+  displayRows,
   formatTokenCount,
   formatUsageCost,
   type ModelUsage,
@@ -66,6 +67,35 @@ function toolEntry(id: string, at: Date, toolUsage: Usage): SessionEntry {
   } as SessionEntry;
 }
 
+function porterEntry(
+  id: string,
+  at: Date,
+  nested: ReturnType<typeof assistantEntry>[],
+  aggregate: Usage,
+): SessionEntry {
+  return {
+    type: "message",
+    id,
+    parentId: null,
+    timestamp: at.toISOString(),
+    message: {
+      role: "toolResult",
+      toolCallId: `call-${id}`,
+      toolName: "porter",
+      content: [],
+      details: {
+        model: "openai-codex/gpt-5.6-luna:high",
+        messages: nested.map((entry) =>
+          entry.type === "message" && entry.message.role === "assistant" ? entry.message : null,
+        ),
+      },
+      usage: aggregate,
+      isError: false,
+      timestamp: at.getTime(),
+    },
+  } as SessionEntry;
+}
+
 function compactionEntry(id: string, at: Date, compactionUsage: Usage): SessionEntry {
   return {
     type: "compaction",
@@ -79,9 +109,28 @@ function compactionEntry(id: string, at: Date, compactionUsage: Usage): SessionE
   };
 }
 
-function model(period: PeriodUsage, provider: string, modelId: string): ModelUsage {
-  const result = period.models.find((item) => item.provider === provider && item.model === modelId);
-  assert.ok(result, `missing ${provider}/${modelId}`);
+function branchSummaryEntry(id: string, at: Date, summaryUsage: Usage): SessionEntry {
+  return {
+    type: "branch_summary",
+    id,
+    parentId: null,
+    timestamp: at.toISOString(),
+    summary: "branch summary",
+    fromId: "from",
+    usage: summaryUsage,
+  } as SessionEntry;
+}
+
+function model(
+  period: PeriodUsage,
+  provider: string,
+  modelId: string,
+  source?: string,
+): ModelUsage {
+  const result = period.models.find(
+    (item) => item.provider === provider && item.model === modelId && item.source === source,
+  );
+  assert.ok(result, `missing ${source ? `${source} · ` : ""}${provider}/${modelId}`);
   return result;
 }
 
@@ -212,6 +261,7 @@ test("groups assistant usage by provider and actual response model", () => {
   const actual = model(report.periods.day, "openrouter", "actual-model");
 
   assert.deepEqual(actual, {
+    category: "primary",
     provider: "openrouter",
     model: "actual-model",
     input: 100,
@@ -226,7 +276,59 @@ test("groups assistant usage by provider and actual response model", () => {
   );
 });
 
-test("keeps tool and summary usage in an unattributed bucket", () => {
+test("attributes Porter usage to its nested provider and model without double-counting", () => {
+  const now = new Date(2026, 2, 18, 12);
+  const at = new Date(2026, 2, 18, 8);
+  const first = assistantEntry({
+    id: "porter-first",
+    at,
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+    usage: usage(100, 20, 30, 0, 0.01),
+  });
+  const second = assistantEntry({
+    id: "porter-second",
+    at: new Date(2026, 2, 18, 8, 1),
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+    usage: usage(50, 10, 15, 0, 0.005),
+  });
+  const aggregate = usage(150, 30, 45, 0, 0.015);
+
+  const report = aggregateUsage([[porterEntry("porter", at, [first, second], aggregate)]], now);
+  const luna = model(report.periods.day, "openai-codex", "gpt-5.6-luna", "Porter");
+
+  assert.equal(luna.category, "delegated");
+  assert.equal(luna.input, 150);
+  assert.equal(luna.output, 30);
+  assert.equal(luna.cacheRead, 45);
+  assert.equal(luna.cost, 0.015);
+  assert.equal(report.periods.day.totals.input, 150);
+  assert.equal(report.eventCount, 2);
+  assert.equal(
+    report.periods.day.models.some((item) => item.category === "overhead"),
+    false,
+  );
+});
+
+test("falls back to unattributed Porter usage when nested messages are unavailable", () => {
+  const now = new Date(2026, 2, 18, 12);
+  const at = new Date(2026, 2, 18, 8);
+  const entry = toolEntry("porter-fallback", at, usage(10, 2, 3, 4, 0.1));
+  if (entry.type === "message" && entry.message.role === "toolResult") {
+    entry.message.toolName = "porter";
+    entry.message.details = { model: "openai-codex/gpt-5.6-luna:high", messages: [] };
+  }
+
+  const report = aggregateUsage([[entry]], now);
+  const unattributed = model(report.periods.day, "", "", "porter");
+
+  assert.equal(unattributed.category, "tool");
+  assert.equal(unattributed.input, 10);
+  assert.equal(unattributed.cost, 0.1);
+});
+
+test("breaks down tool and summary usage by source", () => {
   const now = new Date(2026, 2, 18, 12);
   const at = new Date(2026, 2, 18, 8);
   const report = aggregateUsage(
@@ -234,17 +336,71 @@ test("keeps tool and summary usage in an unattributed bucket", () => {
       [
         toolEntry("tool", at, usage(10, 2, 3, 4, 0.1)),
         compactionEntry("summary", at, usage(5, 1, 0, 0, 0.2)),
+        branchSummaryEntry("branch", at, usage(3, 1, 0, 0, 0.05)),
       ],
     ],
     now,
   );
-  const unattributed = model(report.periods.day, "Unattributed", "Tools / summaries");
+  const tool = model(report.periods.day, "", "", "nested-agent");
+  const compaction = model(report.periods.day, "", "", "Compaction");
+  const branchSummary = model(report.periods.day, "", "", "Branch summary");
 
-  assert.equal(unattributed.input, 15);
-  assert.equal(unattributed.output, 3);
-  assert.equal(unattributed.cacheRead, 3);
-  assert.equal(unattributed.cacheWrite, 4);
-  assert.equal(unattributed.cost, 0.30000000000000004);
+  assert.equal(tool.category, "tool");
+  assert.equal(tool.input, 10);
+  assert.equal(tool.output, 2);
+  assert.equal(tool.cacheRead, 3);
+  assert.equal(tool.cacheWrite, 4);
+  assert.equal(tool.cost, 0.1);
+  assert.equal(compaction.category, "overhead");
+  assert.equal(compaction.input, 5);
+  assert.equal(compaction.output, 1);
+  assert.equal(compaction.cost, 0.2);
+  assert.equal(branchSummary.input, 3);
+  assert.equal(branchSummary.output, 1);
+  assert.equal(branchSummary.cost, 0.05);
+  assert.equal(report.periods.day.totals.cost, 0.35000000000000003);
+});
+
+test("renders source-first sections without provider subtotal rows", () => {
+  const now = new Date(2026, 2, 18, 12);
+  const at = new Date(2026, 2, 18, 8);
+  const primary = assistantEntry({
+    id: "primary",
+    at,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    usage: usage(100, 20, 30, 0, 1),
+  });
+  const delegated = porterEntry(
+    "porter",
+    at,
+    [
+      assistantEntry({
+        id: "delegated",
+        at,
+        provider: "openai-codex",
+        model: "gpt-5.6-luna",
+        usage: usage(10, 2, 3, 0, 0.01),
+      }),
+    ],
+    usage(10, 2, 3, 0, 0.01),
+  );
+  const report = aggregateUsage(
+    [[primary, delegated, compactionEntry("summary", at, usage(5, 1, 0, 0, 0.2))]],
+    now,
+  );
+
+  assert.deepEqual(
+    displayRows(report.periods.day).map((row) => [row.label, row.heading]),
+    [
+      ["Primary models", true],
+      ["  openai-codex / gpt-5.6-sol", false],
+      ["Delegated agents", true],
+      ["  Porter · openai-codex / gpt-5.6-luna", false],
+      ["Session overhead", true],
+      ["  Compaction", false],
+    ],
+  );
 });
 
 test("deduplicates usage copied into forked and cloned sessions", () => {
