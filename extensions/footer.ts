@@ -1,7 +1,7 @@
 /**
  * Custom Footer - a pi port of the Claude statusline (lib/claude/statusline.sh).
  *
- * Layout: folder[/subdir]@branch (#pr) ↑a ↓b (+x -y ?z) | model · thinking | [bar] pct% / size | quotas | $cost
+ * Layout: project[⎇workspace][/subdir]@branch (#pr) ↑a ↓b (+x -y ?z) | model · thinking | [bar] pct% / size | quotas | $cost
  *
  * - folder/branch, ahead/behind, tracked diffstats, and untracked file count come from git
  *   (refreshed asynchronously at most once per CACHE_TTL_MS; branch changes refresh immediately)
@@ -9,7 +9,8 @@
  *   red means failed CI/changes requested, yellow means pending CI/review activity,
  *   green means ready to merge, accent means merged, and dim means another state
  *   (failed or unauthenticated lookups are silently omitted and misses are cached)
- * - worktrees display as "project⎇worktree" like the Claude version
+ * - worktrees and nested `.workspaces` directories display compactly as "project⎇workspace";
+ *   other deep paths omit intermediate directories
  * - the context bar mirrors the statusline: 80% real -> 100% displayed, 10 cells
  * - session cost is summed from assistant message usage (same as the default footer)
  * - subscription quota chips are fetched for Anthropic and OpenAI Codex OAuth;
@@ -362,6 +363,28 @@ function formatWindow(size: number): string {
   return `${size}`;
 }
 
+export function compactDirectory(dir: string): string {
+  const parts = dir.split("/");
+  if (parts.length <= 2) return dir;
+
+  const workspaceIndex = parts.indexOf(".workspaces");
+  if (workspaceIndex > 0 && workspaceIndex < parts.length - 1) {
+    const workspace = `${parts[0]}⎇${parts[workspaceIndex + 1]}`;
+    const nested = parts.slice(workspaceIndex + 2);
+    if (nested.length === 0) return workspace;
+    if (nested.length === 1) return `${workspace}/${nested[0]}`;
+    return `${workspace}/…/${nested.at(-1)}`;
+  }
+
+  return `${parts[0]}/…/${parts.at(-1)}`;
+}
+
+export function modelDisplayName(model: { id: string; name?: string } | undefined): string {
+  const name = model?.name?.trim();
+  if (name) return name;
+  return model?.id.split("/").at(-1) || "no-model";
+}
+
 export default function (pi: ExtensionAPI) {
   let requestQuotaRefresh: (() => void) | undefined;
   let requestPullRequestRefresh: (() => void) | undefined;
@@ -480,7 +503,7 @@ export default function (pi: ExtensionAPI) {
             if (!disposed) tui.requestRender();
           });
           if (git) {
-            let folder = git.dir;
+            let folder = compactDirectory(git.dir);
             if (branch) {
               folder += theme.fg("dim", "@") + theme.fg("mdLink", branch);
               if (pullRequest?.branch === branch) {
@@ -518,7 +541,7 @@ export default function (pi: ExtensionAPI) {
             parts.push(basename(ctx.cwd));
           }
 
-          let modelPart = ctx.model?.id ?? "no-model";
+          let modelPart = modelDisplayName(ctx.model);
           if (ctx.model?.reasoning && ctx.thinkingLevel) {
             const level = ctx.thinkingLevel;
             const colored =
