@@ -5,6 +5,13 @@
 
 Personal configuration, extensions, and skills for [Pi](https://pi.dev).
 
+## Porter
+
+`extensions/porter/` adds a `porter` tool for explicitly authorized Git shipping work. Porter
+runs in an isolated `openai-codex/gpt-5.6-luna:high` session with only `read` and `bash`; it can
+inspect, check, commit, and, when the user requested it, push and open a pull request. It cannot
+edit files and keeps the guardrails extension enabled.
+
 ## Notion
 
 `extensions/notion.ts` provides read-only `notion_search` and `notion_read` tools. It uses a
