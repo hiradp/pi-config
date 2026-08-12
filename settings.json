@@ -93,7 +93,7 @@
   },
   "tuiMode": "fullscreen",
   "treeFilterMode": "default",
-  "transport": "sse",
+  "transport": "auto",
   "steeringMode": "one-at-a-time",
   "compaction": {
     "enabled": true
