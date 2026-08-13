@@ -21,6 +21,7 @@
 /extensions/*
 !/extensions/footer.ts
 !/extensions/notion.ts
+!/extensions/response-editor.ts
 !/extensions/usage.ts
 !/extensions/working-message.ts
 !/extensions/slack/

@@ -11,6 +11,7 @@ Personal configuration, extensions, and skills for [Pi](https://pi.dev).
 
 - **[Guardrails](extensions/guardrails/README.md)** — deterministic safety policies for agent tools and user shell commands, with optional scoped semantic review. Includes `/guardrails status`, `/guardrails config`, `/guardrails reload`, `/guardrails denials`, `/guardrails reviews`, `/guardrails reset`, and interactive maintenance mode.
 - **Notion** — read-only `notion_search` and `notion_read` tools for finding and reading pages and databases. See [`extensions/notion.ts`](extensions/notion.ts).
+- **Response editor** — `/edit-response [app]` opens the latest assistant response in the configured external editor or a named app such as Zed or MarkEdit, then loads the saved text into Pi's chat editor.
 - **[Slack](extensions/slack/README.md)** — fixed, read-only MCP tools: `slack_search`, `slack_read_channel`, `slack_read_thread`, and `slack_search_users`. Includes `/slack-login`, `/slack-status`, `/slack-logout`, and `/slack-discover`.
 - **Usage** — `/usage` shows token usage, cost, and recent trends from Pi sessions.
 - **Working message** — displays live request progress, token counts, and thinking time, then records a compact completion entry.
