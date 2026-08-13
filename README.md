@@ -5,20 +5,23 @@
 
 Personal configuration, extensions, and skills for [Pi](https://pi.dev).
 
-## Notion
+## What's included
 
-`extensions/notion.ts` provides read-only `notion_search` and `notion_read` tools. It uses a
-`token_v2` session supplied through `NOTION_TOKEN`; on macOS it can otherwise read the logged-in
-Notion.app session from the Keychain and cookie database. The extension only calls Notion's private
-read endpoints. Its approach is inspired by
-[Matt Robenolt's Notion extension](https://github.com/mattrobenolt/pi-configs/tree/main/packages/notion).
+### Extensions
 
-## Slack
+- **[Guardrails](extensions/guardrails/README.md)** — deterministic safety policies for agent tools and user shell commands, with optional scoped semantic review. Includes `/guardrails status`, `/guardrails config`, `/guardrails reload`, `/guardrails denials`, `/guardrails reviews`, `/guardrails reset`, and interactive maintenance mode.
+- **Notion** — read-only `notion_search` and `notion_read` tools for finding and reading pages and databases. See [`extensions/notion.ts`](extensions/notion.ts).
+- **[Slack](extensions/slack/README.md)** — fixed, read-only MCP tools: `slack_search`, `slack_read_channel`, `slack_read_thread`, and `slack_search_users`. Includes `/slack-login`, `/slack-status`, `/slack-logout`, and `/slack-discover`.
+- **Usage** — `/usage` shows token usage, cost, and recent trends from Pi sessions.
+- **Working message** — displays live request progress, token counts, and thinking time, then records a compact completion entry.
+- **Footer** — custom status footer with model, context, cost, quota, and pull-request information where available.
 
-`extensions/slack/` provides fixed read-only tools backed by Slack's official hosted MCP server.
-It uses public-client PKCE OAuth and stores credentials only in the operating system keyring. See
-[`extensions/slack/README.md`](extensions/slack/README.md) for Slack app setup, scopes, privacy, and
-session-retention guidance.
+### Skills
+
+- **commit** — inspect, organize, and create focused local Git commits.
+- **create-pr** — prepare or publish a focused GitHub pull request when explicitly requested.
+- **deslop** — remove unnecessary AI-generated comments and section headers from code changes.
+- **review** — perform read-only reviews of diffs, branches, pull requests, files, and design documents.
 
 ## Development
 
