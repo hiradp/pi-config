@@ -30,8 +30,20 @@
 !/extensions/slack/**
 !/extensions/guardrails/
 !/extensions/guardrails/**
+!/extensions/subagent/
+!/extensions/subagent/**
 !/extensions/tests/
 !/extensions/tests/**
+
+!/agents/
+/agents/*
+!/agents/code-reviewer.md
+!/agents/plan-reviewer.md
+
+!/prompts/
+/prompts/*
+!/prompts/review-code-pass.md
+!/prompts/review-plan-pass.md
 
 !/skills/
 /skills/*

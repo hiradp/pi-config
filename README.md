@@ -13,6 +13,7 @@ Personal configuration, extensions, and skills for [Pi](https://pi.dev).
 - **Notion** — read-only `notion_search` and `notion_read` tools for finding and reading pages and databases. See [`extensions/notion.ts`](extensions/notion.ts).
 - **Response editor** — `/edit-response [app]` opens the latest assistant response in the configured external editor or a named app such as Zed or MarkEdit, then loads the saved text into Pi's chat editor.
 - **[Slack](extensions/slack/README.md)** — fixed, read-only MCP tools: `slack_search`, `slack_read_channel`, `slack_read_thread`, and `slack_search_users`. Includes `/slack-login`, `/slack-status`, `/slack-logout`, and `/slack-discover`.
+- **[Subagent](extensions/subagent/README.md)** — runs isolated, model-selectable agents individually, in parallel, or as a chain. Includes plan and code review passes using Sol and Kimi K3.
 - **Usage** — `/usage` shows token usage, cost, and recent trends from Pi sessions.
 - **Working message** — displays live request progress, token counts, and thinking time, then records a compact completion entry.
 - **Footer** — custom status footer with model, context, cost, quota, and pull-request information where available.
