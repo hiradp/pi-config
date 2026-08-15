@@ -19,6 +19,8 @@
 
 !/extensions/
 /extensions/*
+!/extensions/diff-review/
+!/extensions/diff-review/**
 !/extensions/footer.ts
 !/extensions/notion.ts
 !/extensions/response-editor.ts
