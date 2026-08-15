@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.84.1",
+  "lastChangelogVersion": "0.84.2",
   "theme": "rustic-light/dark",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
@@ -19,14 +19,28 @@
   "editorPaddingX": 1,
   "guardrails": {
     "commands": {
-      "blocked": ["wrangler"]
+      "blocked": [
+        "wrangler"
+      ]
     },
     "defaultBranch": {
-      "allowed": ["hiradp/*"]
+      "allowed": [
+        "hiradp/*"
+      ]
     },
     "paths": {
-      "blocked": [".git", ".git/**", "~/.ssh"],
-      "confirm": [".env", ".env.*", ".pi", ".pi/**", "~/.ssh/**"]
+      "blocked": [
+        ".git",
+        ".git/**",
+        "~/.ssh"
+      ],
+      "confirm": [
+        ".env",
+        ".env.*",
+        ".pi",
+        ".pi/**",
+        "~/.ssh/**"
+      ]
     },
     "semanticReview": {
       "enabled": true,
@@ -101,4 +115,3 @@
   "enableInstallTelemetry": false,
   "defaultProjectTrust": "ask"
 }
-
