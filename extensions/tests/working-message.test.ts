@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import workingMessageExtension, {
   formatDuration,
+  formatTimeOfDay,
   formatTokenCount,
   formatWorkingStats,
 } from "../working-message.ts";
@@ -27,6 +28,12 @@ test("formats Claude-style working statistics", () => {
     formatWorkingStats(376_000, 22_900, 10_000),
     "(6m 16s · ↓ 22.9k tokens · thought for 10s)",
   );
+});
+
+test("formats the time of day in 12-hour clock", () => {
+  assert.equal(formatTimeOfDay(new Date(2025, 0, 15, 15, 45).getTime()), "3:45 PM");
+  assert.equal(formatTimeOfDay(new Date(2025, 0, 15, 0, 5).getTime()), "12:05 AM");
+  assert.equal(formatTimeOfDay(new Date(2025, 0, 15, 12, 0).getTime()), "12:00 PM");
 });
 
 test("persists the completed working message in the session transcript", () => {
@@ -74,8 +81,9 @@ test("persists the completed working message in the session transcript", () => {
   assert.match(workingMessages[0] ?? "", /… \(0s\)$/);
   assert.equal(workingMessages.at(-1), undefined);
 
-  const data = entries[0]?.data as { durationMs: number };
+  const data = entries[0]?.data as { durationMs: number; completedAtMs?: number };
   assert.ok(data.durationMs >= 0);
+  assert.ok(data.completedAtMs !== undefined);
   assert.ok(entryRenderer);
 
   const component = entryRenderer(
@@ -92,5 +100,8 @@ test("persists the completed working message in the session transcript", () => {
   );
 
   assert.ok(component);
-  assert.equal(component.render(100)[0]?.trimEnd(), `✓ Done in ${formatDuration(data.durationMs)}`);
+  assert.equal(
+    component.render(100)[0]?.trimEnd(),
+    `✓ Done in ${formatDuration(data.durationMs)} at ${formatTimeOfDay(data.completedAtMs)}`,
+  );
 });

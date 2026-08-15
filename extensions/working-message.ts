@@ -3,8 +3,8 @@
  *
  * The phrase rotates every 20 seconds while a themed shimmer moves across it.
  * The working row shows elapsed time, received output tokens, and the duration
- * of the latest thinking block. Completed durations are stored in the session
- * and rendered beneath each response.
+ * of the latest thinking block. Completed durations and the wall-clock time the
+ * agent finished are stored in the session and rendered beneath each response.
  */
 
 import { performance } from "node:perf_hooks";
@@ -18,6 +18,7 @@ const WORKING_MESSAGE_ENTRY = "working-message";
 
 interface WorkingMessageEntryData {
   durationMs: number;
+  completedAtMs?: number;
 }
 
 const WORKING_PHRASES = [
@@ -89,6 +90,15 @@ export function formatDuration(milliseconds: number): string {
   return `${hours}h ${minutes.toString().padStart(2, "0")}m`;
 }
 
+export function formatTimeOfDay(epochMs: number): string {
+  const date = new Date(epochMs);
+  const hours = date.getHours();
+  const suffix = hours >= 12 ? "PM" : "AM";
+  const hour12 = hours % 12 || 12;
+  const minutes = date.getMinutes().toString().padStart(2, "0");
+  return `${hour12}:${minutes} ${suffix}`;
+}
+
 export function formatTokenCount(tokens: number): string {
   const count = Math.max(0, tokens);
   if (count < 1_000) return Math.round(count).toString();
@@ -141,8 +151,12 @@ export default function (pi: ExtensionAPI) {
       if (!entry.data) return;
 
       const elapsed = formatDuration(entry.data.durationMs);
+      const doneAt =
+        entry.data.completedAtMs !== undefined
+          ? ` at ${formatTimeOfDay(entry.data.completedAtMs)}`
+          : "";
       const check = theme.fg("success", "✓");
-      const message = theme.fg("dim", `Done in ${elapsed}`);
+      const message = theme.fg("dim", `Done in ${elapsed}${doneAt}`);
       return new Text(`${check} ${message}`, 0, 0);
     },
   );
@@ -233,7 +247,10 @@ export default function (pi: ExtensionAPI) {
 
     ctx.ui.setWorkingMessage();
     if (durationMs !== null) {
-      pi.appendEntry<WorkingMessageEntryData>(WORKING_MESSAGE_ENTRY, { durationMs });
+      pi.appendEntry<WorkingMessageEntryData>(WORKING_MESSAGE_ENTRY, {
+        durationMs,
+        completedAtMs: Date.now(),
+      });
     }
   });
 
