@@ -26,7 +26,8 @@
 !/extensions/response-annotator.ts
 !/extensions/ui/
 !/extensions/ui/**
-!/extensions/usage-report.ts
+!/extensions/usage/
+!/extensions/usage/**
 !/extensions/slack/
 !/extensions/slack/**
 !/extensions/guardrails/
