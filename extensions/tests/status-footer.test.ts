@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { compactDirectory, modelDisplayName, sessionCost } from "../status-footer.ts";
+import { compactDirectory, modelDisplayName, sessionCost } from "../ui/status-footer.ts";
 
 test("compacts nested workspace paths", () => {
   assert.equal(

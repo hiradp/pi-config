@@ -12,7 +12,7 @@ import turnProgressExtension, {
   formatTimeOfDay,
   formatTokenCount,
   formatWorkingStats,
-} from "../turn-progress.ts";
+} from "../ui/turn-progress.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 

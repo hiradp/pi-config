@@ -24,8 +24,8 @@
 !/extensions/notion/
 !/extensions/notion/**
 !/extensions/response-annotator.ts
-!/extensions/status-footer.ts
-!/extensions/turn-progress.ts
+!/extensions/ui/
+!/extensions/ui/**
 !/extensions/usage-report.ts
 !/extensions/slack/
 !/extensions/slack/**
