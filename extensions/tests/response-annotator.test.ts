@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { findLastAssistantText, resolveEditorInvocation } from "../response-annotator.ts";
+import { findLastAssistantText, resolveEditorInvocation } from "../response-annotator/index.ts";
 
 function messageEntry(id: string, message: AssistantMessage | UserMessage): SessionEntry {
   return {

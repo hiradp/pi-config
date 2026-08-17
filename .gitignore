@@ -23,7 +23,8 @@
 !/extensions/diff-annotator/**
 !/extensions/notion/
 !/extensions/notion/**
-!/extensions/response-annotator.ts
+!/extensions/response-annotator/
+!/extensions/response-annotator/**
 !/extensions/ui/
 !/extensions/ui/**
 !/extensions/usage/
