@@ -3,7 +3,7 @@
   "theme": "rustic-light/dark",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "xhigh",
+  "defaultThinkingLevel": "high",
   "enabledModels": [
     "openai-codex/gpt-5.6-sol",
     "openai-codex/gpt-5.6-terra",
@@ -15,7 +15,7 @@
     "fireworks/accounts/fireworks/models/glm-5p2",
     "xai/grok-4.5"
   ],
-  "quietStartup": true,
+  "quietStartup": false,
   "editorPaddingX": 1,
   "guardrails": {
     "commands": {
@@ -113,5 +113,6 @@
     "enabled": true
   },
   "enableInstallTelemetry": false,
-  "defaultProjectTrust": "ask"
+  "defaultProjectTrust": "ask",
+  "hideThinkingBlock": false
 }
