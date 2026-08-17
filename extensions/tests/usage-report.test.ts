@@ -9,7 +9,7 @@ import {
   formatUsageCost,
   type ModelUsage,
   type PeriodUsage,
-} from "../usage.ts";
+} from "../usage-report.ts";
 
 function usage(input: number, output: number, cacheRead = 0, cacheWrite = 0, cost = 0): Usage {
   return {

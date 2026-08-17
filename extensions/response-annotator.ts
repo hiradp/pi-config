@@ -91,7 +91,7 @@ async function editInExternalEditor(
   let directory: string | undefined;
 
   try {
-    directory = await mkdtemp(join(tmpdir(), "pi-response-editor-"));
+    directory = await mkdtemp(join(tmpdir(), "pi-response-annotator-"));
     const filePath = join(directory, "response.md");
     await writeFile(filePath, content, "utf8");
     if (!editor.command) return { status: "failed", error: "No external editor is configured" };
@@ -155,8 +155,8 @@ async function openEditor(
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerCommand("edit-response", {
-    description: "Edit the last assistant response externally (optionally: zed or markedit)",
+  pi.registerCommand("annotate-response", {
+    description: "Annotate the last assistant response externally (optionally: zed or markedit)",
     getArgumentCompletions: (prefix) => {
       const editors = ["zed", "markedit"];
       const matches = editors.filter((editor) => editor.startsWith(prefix.toLowerCase()));
@@ -166,7 +166,7 @@ export default function (pi: ExtensionAPI) {
     },
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") {
-        ctx.ui.notify("edit-response requires interactive mode", "error");
+        ctx.ui.notify("annotate-response requires interactive mode", "error");
         return;
       }
       if (!ctx.isIdle()) {
@@ -184,7 +184,7 @@ export default function (pi: ExtensionAPI) {
       if (draft.trim()) {
         const replace = await ctx.ui.confirm(
           "Replace current draft?",
-          "The edited assistant response will replace the text currently in the chat editor.",
+          "The annotated assistant response will replace the text currently in the chat editor.",
         );
         if (!replace) return;
       }
@@ -196,7 +196,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.setEditorText(result.content ?? "");
-      ctx.ui.notify("Edited response loaded into the chat editor", "info");
+      ctx.ui.notify("Annotated response loaded into the chat editor", "info");
     },
   });
 }

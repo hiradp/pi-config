@@ -1,5 +1,5 @@
 /**
- * Custom Footer - a pi port of the Claude statusline (lib/claude/statusline.sh).
+ * Status Footer - a pi port of the Claude statusline (lib/claude/statusline.sh).
  *
  * Layout: project[⎇workspace][/subdir]@branch (#pr) ↑a ↓b (+x -y ?z) | model · thinking | [bar] pct% / size | quotas | $cost
  *

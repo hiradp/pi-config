@@ -7,12 +7,12 @@ import type {
   ExtensionContext,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import workingMessageExtension, {
+import turnProgressExtension, {
   formatDuration,
   formatTimeOfDay,
   formatTokenCount,
   formatWorkingStats,
-} from "../working-message.ts";
+} from "../turn-progress.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 
@@ -71,7 +71,7 @@ test("persists the completed working message in the session transcript", () => {
     },
   } as unknown as ExtensionContext;
 
-  workingMessageExtension(pi);
+  turnProgressExtension(pi);
   handlers.get("before_agent_start")?.({}, ctx);
   handlers.get("agent_settled")?.({}, ctx);
 

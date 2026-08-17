@@ -1,5 +1,5 @@
 /**
- * Working Message - shows a random phrase and elapsed time in Pi's working row.
+ * Turn Progress - shows a random phrase and elapsed time in Pi's working row.
  *
  * The phrase rotates every 20 seconds while a themed shimmer moves across it.
  * The working row shows elapsed time, received output tokens, and the duration
@@ -14,9 +14,9 @@ import { Text } from "@earendil-works/pi-tui";
 const SHIMMER_INTERVAL_MS = 100;
 const SHIMMER_WIDTH = 3;
 const WORKING_PHRASE_INTERVAL_MS = 20_000;
-const WORKING_MESSAGE_ENTRY = "working-message";
+const TURN_PROGRESS_ENTRY = "working-message";
 
-interface WorkingMessageEntryData {
+interface TurnProgressEntryData {
   durationMs: number;
   completedAtMs?: number;
 }
@@ -145,21 +145,18 @@ export default function (pi: ExtensionAPI) {
   let lastThoughtDurationMs: number | null = null;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
 
-  pi.registerEntryRenderer<WorkingMessageEntryData>(
-    WORKING_MESSAGE_ENTRY,
-    (entry, _options, theme) => {
-      if (!entry.data) return;
+  pi.registerEntryRenderer<TurnProgressEntryData>(TURN_PROGRESS_ENTRY, (entry, _options, theme) => {
+    if (!entry.data) return;
 
-      const elapsed = formatDuration(entry.data.durationMs);
-      const doneAt =
-        entry.data.completedAtMs !== undefined
-          ? ` at ${formatTimeOfDay(entry.data.completedAtMs)}`
-          : "";
-      const check = theme.fg("success", "✓");
-      const message = theme.fg("dim", `Done in ${elapsed}${doneAt}`);
-      return new Text(`${check} ${message}`, 0, 0);
-    },
-  );
+    const elapsed = formatDuration(entry.data.durationMs);
+    const doneAt =
+      entry.data.completedAtMs !== undefined
+        ? ` at ${formatTimeOfDay(entry.data.completedAtMs)}`
+        : "";
+    const check = theme.fg("success", "✓");
+    const message = theme.fg("dim", `Done in ${elapsed}${doneAt}`);
+    return new Text(`${check} ${message}`, 0, 0);
+  });
 
   const stopWorkingTimer = () => {
     if (workingTimer !== undefined) clearInterval(workingTimer);
@@ -247,7 +244,7 @@ export default function (pi: ExtensionAPI) {
 
     ctx.ui.setWorkingMessage();
     if (durationMs !== null) {
-      pi.appendEntry<WorkingMessageEntryData>(WORKING_MESSAGE_ENTRY, {
+      pi.appendEntry<TurnProgressEntryData>(TURN_PROGRESS_ENTRY, {
         durationMs,
         completedAtMs: Date.now(),
       });

@@ -19,13 +19,13 @@ const defaultDeps: ReviewFlowDeps = {
   composePrompt: composeReviewPrompt,
 };
 
-async function runReview(
+async function runAnnotator(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   deps: ReviewFlowDeps = defaultDeps,
 ): Promise<void> {
   if (ctx.mode !== "tui") {
-    ctx.ui.notify("/diff-review requires interactive TUI mode", "error");
+    ctx.ui.notify("/annotate-diff requires interactive TUI mode", "error");
     return;
   }
 
@@ -156,18 +156,18 @@ async function runReview(
   ctx.ui.notify("Review feedback written to the editor", "info");
 }
 
-export function createDiffReviewCommand(
+export function createDiffAnnotatorCommand(
   pi: ExtensionAPI,
   deps: ReviewFlowDeps = defaultDeps,
 ): void {
-  pi.registerCommand("diff-review", {
-    description: "Review the working-tree diff with Vim-style line and block comments",
+  pi.registerCommand("annotate-diff", {
+    description: "Annotate the working-tree diff with Vim-style line and block comments",
     handler: async (_args, ctx) => {
-      await runReview(pi, ctx, deps);
+      await runAnnotator(pi, ctx, deps);
     },
   });
 }
 
 export default function (pi: ExtensionAPI): void {
-  createDiffReviewCommand(pi);
+  createDiffAnnotatorCommand(pi);
 }

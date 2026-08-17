@@ -6,12 +6,12 @@ import { test } from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
-import { captureReviewSnapshot, type RunGitLike } from "../diff-review/git.ts";
-import { parseReviewSnapshot } from "../diff-review/parser.ts";
-import { composeReviewPrompt } from "../diff-review/prompt.ts";
-import { createDiffStyler, type DiffStyleTheme } from "../diff-review/render.ts";
-import { DiffReviewerComponent } from "../diff-review/reviewer.ts";
-import type { ReviewComment, ReviewFile, ReviewSnapshot } from "../diff-review/types.ts";
+import { captureReviewSnapshot, type RunGitLike } from "../diff-annotator/git.ts";
+import { parseReviewSnapshot } from "../diff-annotator/parser.ts";
+import { composeReviewPrompt } from "../diff-annotator/prompt.ts";
+import { createDiffStyler, type DiffStyleTheme } from "../diff-annotator/render.ts";
+import { DiffReviewerComponent } from "../diff-annotator/reviewer.ts";
+import type { ReviewComment, ReviewFile, ReviewSnapshot } from "../diff-annotator/types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -131,7 +131,7 @@ test("parses hunk lines and old/new line numbers", () => {
 });
 
 test("captures staged, unstaged, and untracked changes together", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-diff-review-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-diff-annotator-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
 
   await realGit.exec("git", ["init"], { cwd: directory });
@@ -169,7 +169,7 @@ test("captures staged, unstaged, and untracked changes together", async (t) => {
 });
 
 test("staged files are captured in repositories without commits", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-diff-review-unborn-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-diff-annotator-unborn-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
 
   await realGit.exec("git", ["init"], { cwd: directory });
@@ -184,8 +184,8 @@ test("staged files are captured in repositories without commits", async (t) => {
 });
 
 test("untracked symlinks render their target and special files are rejected", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-diff-review-links-"));
-  const outside = await mkdtemp(join(tmpdir(), "pi-diff-review-outside-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-diff-annotator-links-"));
+  const outside = await mkdtemp(join(tmpdir(), "pi-diff-annotator-outside-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   t.after(() => rm(outside, { recursive: true, force: true }));
 
@@ -205,7 +205,7 @@ test("untracked symlinks render their target and special files are rejected", as
 });
 
 test("captures renames and marks binary files non-reviewable", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-diff-review-rename-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-diff-annotator-rename-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
 
   await realGit.exec("git", ["init"], { cwd: directory });
@@ -519,7 +519,7 @@ test("? toggles help and help lists picker keys", () => {
 });
 
 test("stale working tree reopens the reviewer with comments intact", async () => {
-  const { createDiffReviewCommand } = await import("../diff-review/index.ts");
+  const { createDiffAnnotatorCommand } = await import("../diff-annotator/index.ts");
 
   const snap = snapshot();
   const parsed = parseReviewSnapshot(snap);
@@ -541,7 +541,7 @@ test("stale working tree reopens the reviewer with comments intact", async () =>
     },
     exec: async () => ({ code: 0, stdout: "", stderr: "" }),
   };
-  createDiffReviewCommand(pi as never, deps as never);
+  createDiffAnnotatorCommand(pi as never, deps as never);
 
   const notifications: string[] = [];
   let editorText = "";
@@ -731,7 +731,7 @@ test("long comments keep the cursor line visible in the dock", () => {
 });
 
 test("a failed staleness check reopens the reviewer with comments intact", async () => {
-  const { createDiffReviewCommand } = await import("../diff-review/index.ts");
+  const { createDiffAnnotatorCommand } = await import("../diff-annotator/index.ts");
 
   const snap = snapshot();
   const parsed = parseReviewSnapshot(snap);
@@ -753,7 +753,7 @@ test("a failed staleness check reopens the reviewer with comments intact", async
     },
     exec: async () => ({ code: 0, stdout: "", stderr: "" }),
   };
-  createDiffReviewCommand(pi as never, deps as never);
+  createDiffAnnotatorCommand(pi as never, deps as never);
 
   const notifications: string[] = [];
   let editorText = "";
@@ -893,7 +893,7 @@ test("file motions land on the first selectable line, including single-line file
 });
 
 test("modified files with non-ASCII paths receive their patches", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-diff-review-unicode-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-diff-annotator-unicode-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
 
   await realGit.exec("git", ["init"], { cwd: directory });
@@ -914,7 +914,7 @@ test("modified files with non-ASCII paths receive their patches", async (t) => {
 });
 
 test("pure renames keep their metadata patch and stay listed", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-diff-review-pure-rename-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-diff-annotator-pure-rename-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
 
   await realGit.exec("git", ["init"], { cwd: directory });
@@ -934,7 +934,7 @@ test("pure renames keep their metadata patch and stay listed", async (t) => {
 });
 
 test("binary and placeholder-only files still affect the fingerprint", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-diff-review-binfp-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-diff-annotator-binfp-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
 
   await realGit.exec("git", ["init"], { cwd: directory });
@@ -1034,7 +1034,7 @@ test("backward file motion from inside a file enters the previous file", () => {
 });
 
 test("modified tracked files with spaces in their names receive patches", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-diff-review-spaces-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-diff-annotator-spaces-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
 
   await realGit.exec("git", ["init"], { cwd: directory });

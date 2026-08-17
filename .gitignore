@@ -19,13 +19,13 @@
 
 !/extensions/
 /extensions/*
-!/extensions/diff-review/
-!/extensions/diff-review/**
-!/extensions/footer.ts
+!/extensions/diff-annotator/
+!/extensions/diff-annotator/**
 !/extensions/notion.ts
-!/extensions/response-editor.ts
-!/extensions/usage.ts
-!/extensions/working-message.ts
+!/extensions/response-annotator.ts
+!/extensions/status-footer.ts
+!/extensions/turn-progress.ts
+!/extensions/usage-report.ts
 !/extensions/slack/
 !/extensions/slack/**
 !/extensions/guardrails/
@@ -42,8 +42,9 @@
 
 !/prompts/
 /prompts/*
-!/prompts/review-code-pass.md
-!/prompts/review-plan-pass.md
+!/prompts/review-code.md
+!/prompts/review-plan.md
+!/prompts/review-pr.md
 
 !/skills/
 /skills/*
