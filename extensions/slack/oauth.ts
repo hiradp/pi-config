@@ -716,13 +716,22 @@ export function validateRefreshedToken(
 
 export function validateEffectiveScopes(scopes: string[]): string[] {
   const actual = new Set(scopes);
-  if (actual.size !== scopes.length || actual.size !== SLACK_SCOPES.length) {
-    throw new Error("Slack returned an unapproved OAuth scope set.");
-  }
-  for (const scope of SLACK_SCOPES) {
-    if (!actual.has(scope)) throw new Error("Slack returned an unapproved OAuth scope set.");
+  const approved = new Set<string>(SLACK_SCOPES);
+  const missing = SLACK_SCOPES.filter((scope) => !actual.has(scope));
+  const unexpected = [...actual].filter((scope) => !approved.has(scope));
+  if (missing.length > 0 || unexpected.length > 0) {
+    const details = [
+      ...(missing.length > 0 ? [`missing: ${missing.join(", ")}`] : []),
+      ...(unexpected.length > 0 ? [`unexpected: ${formatScopes(unexpected)}`] : []),
+    ];
+    throw new Error(`Slack returned an unapproved OAuth scope set (${details.join("; ")}).`);
   }
   return [...SLACK_SCOPES];
+}
+
+function formatScopes(scopes: string[]): string {
+  const shown = scopes.slice(0, 10).map((scope) => JSON.stringify(scope.slice(0, 100)));
+  return `${shown.join(", ")}${scopes.length > shown.length ? `, and ${scopes.length - shown.length} more` : ""}`;
 }
 
 interface CallbackOptions {

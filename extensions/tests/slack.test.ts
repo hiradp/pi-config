@@ -312,9 +312,14 @@ test("validates exact scopes, user-token evidence, and configured identity", () 
     ),
   );
 
+  assert.deepEqual(validateEffectiveScopes([...SLACK_SCOPES, SLACK_SCOPES[0]]), SLACK_SCOPES);
   assert.throws(
     () => validateEffectiveScopes([...SLACK_SCOPES, "channels:read"]),
-    /unapproved OAuth scope set/,
+    /unapproved OAuth scope set \(unexpected: "channels:read"\)/,
+  );
+  assert.throws(
+    () => validateEffectiveScopes(SLACK_SCOPES.filter((scope) => scope !== "groups:history")),
+    /unapproved OAuth scope set \(missing: groups:history\)/,
   );
   assert.throws(
     () =>

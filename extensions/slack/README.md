@@ -86,7 +86,7 @@ No OAuth client can guarantee permanent unattended access. `/slack-login` is sti
 
 - **Not authenticated:** run `/slack-login` directly in the TUI. Pi prompts for the public client ID only if it has never stored one. A model tool can never open a browser.
 - **Public PKCE client rejected:** confirm PKCE is enabled and the callback URI is an exact match. Do not add a client secret.
-- **Scope validation failed:** remove extra user scopes from the app, then run `/slack-logout` and `/slack-login`.
+- **Scope validation failed:** the error lists the missing and unexpected effective scopes. Align the app's user scopes with the required set, revoke or reinstall a stale Slack grant if needed, then run `/slack-logout` and `/slack-login`. Repeated entries in Slack's response are harmless because they do not change the effective permission set.
 - **Authentication expires:** enable token rotation in the Slack app and run `/slack-login` again. If Slack still omits a refresh token, browser reauthorization cannot be automated safely.
 - **Temporary refresh failure:** retry the Slack read later; transient failures no longer delete credentials.
 - **Approved tool unavailable or incompatible:** run `/slack-discover`, compare the live schema with `tools.ts`, and review Slack's change before updating the contract.
