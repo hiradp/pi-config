@@ -29,6 +29,8 @@
 !/extensions/ui/**
 !/extensions/usage/
 !/extensions/usage/**
+!/extensions/session-review/
+!/extensions/session-review/**
 !/extensions/slack/
 !/extensions/slack/**
 !/extensions/guardrails/
