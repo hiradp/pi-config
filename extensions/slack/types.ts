@@ -17,6 +17,7 @@ export const SLACK_SCOPES = [
   "groups:history",
   "im:history",
   "mpim:history",
+  "chat:write",
 ] as const;
 
 export interface SlackIdentity {
