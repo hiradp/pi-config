@@ -21,6 +21,8 @@
 /extensions/*
 !/extensions/diff-annotator/
 !/extensions/diff-annotator/**
+!/extensions/claude/
+!/extensions/claude/**
 !/extensions/notion/
 !/extensions/notion/**
 !/extensions/response-annotator/
