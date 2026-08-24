@@ -343,6 +343,17 @@ export default function (pi: ExtensionAPI) {
   let outputDirectory: Promise<string> | undefined;
   let persistedOutputBytes = 0;
 
+  const setClaudeActive = (active: boolean) => {
+    const activeTools = pi.getActiveTools();
+    pi.setActiveTools(
+      active
+        ? [...new Set([...activeTools, "claude"])]
+        : activeTools.filter((name) => name !== "claude"),
+    );
+  };
+
+  const isClaudeActive = () => pi.getActiveTools().includes("claude");
+
   const saveFullOutput = async (output: string): Promise<string | undefined> => {
     const outputBytes = Buffer.byteLength(output, "utf8");
     if (persistedOutputBytes + outputBytes > MAX_PERSISTED_OUTPUT_BYTES) return undefined;
@@ -361,6 +372,10 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  pi.on("session_start", () => {
+    setClaudeActive(false);
+  });
+
   pi.on("session_shutdown", async () => {
     const directory = outputDirectory;
     outputDirectory = undefined;
@@ -375,14 +390,39 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", (event) => {
-    if (event.toolName !== "claude" || !hasFailedClaudeResult(event.details)) return;
-    return { isError: true };
+    if (event.toolName !== "claude") return;
+    setClaudeActive(false);
+    if (hasFailedClaudeResult(event.details)) return { isError: true };
+  });
+
+  pi.registerCommand("claude-tool", {
+    description: "Arm or disarm Claude Code delegation for one invocation",
+    handler: async (args, ctx) => {
+      const action = args.trim().toLowerCase();
+      if (action === "on") {
+        setClaudeActive(true);
+        ctx.ui.notify("Claude delegation armed for one invocation", "info");
+        return;
+      }
+      if (action === "off") {
+        setClaudeActive(false);
+        ctx.ui.notify("Claude delegation disarmed", "info");
+        return;
+      }
+      ctx.ui.notify(
+        `Claude delegation is ${isClaudeActive() ? "armed" : "disarmed"}. Usage: /claude-tool on|off`,
+        "info",
+      );
+    },
   });
 
   pi.registerTool({
     name: "claude",
     label: "Claude Code",
-    description: `Delegate a prompt to the official Claude Code CLI. Defaults to model "${DEFAULT_MODEL}" with "${DEFAULT_EFFORT}" effort. Claude runs without nested tools. Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; full truncated output is saved temporarily when possible.`,
+    description: `Delegate a prompt to the official Claude Code CLI only when the user explicitly requests Claude Code delegation. Defaults to model "${DEFAULT_MODEL}" with "${DEFAULT_EFFORT}" effort. Claude runs without nested tools. Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; full truncated output is saved temporarily when possible.`,
+    promptGuidelines: [
+      "Use claude only when the user explicitly asks to delegate to Claude Code. Do not use claude for routine analysis, implementation, review, or unsolicited second opinions.",
+    ],
     parameters: Type.Object({
       prompt: Type.String({ description: "Prompt to send to Claude Code", minLength: 1 }),
       model: Type.Optional(

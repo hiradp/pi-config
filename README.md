@@ -9,7 +9,7 @@ Personal configuration, extensions, and skills for [Pi](https://pi.dev).
 
 ### Extensions
 
-- **Claude Code** — delegates prompts to the official Claude Code CLI with configurable model and effort, defaulting to Opus at high effort.
+- **Claude Code** — delegates prompts to the official Claude Code CLI with configurable model and effort, defaulting to Opus at high effort. Delegation is inactive by default; `/claude-tool on` arms it for one invocation.
 - **[Guardrails](extensions/guardrails/README.md)** — deterministic safety policies for agent tools and user shell commands, with optional scoped semantic review. Includes `/guardrails status`, `/guardrails config`, `/guardrails reload`, `/guardrails denials`, `/guardrails reviews`, `/guardrails reset`, and interactive maintenance mode.
 - **Notion** — read-only `notion_search` and `notion_read` tools for finding and reading pages and databases. See [`extensions/notion/`](extensions/notion/).
 - **Response annotator** — `/annotate-response [app]` opens the latest assistant response in the configured external editor or a named app such as Zed or MarkEdit, then loads the annotated text into Pi's chat editor.

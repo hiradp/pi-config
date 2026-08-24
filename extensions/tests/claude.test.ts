@@ -152,13 +152,73 @@ test("pipes child input, bounds output, and escalates cancellation", async () =>
   assert.equal(canceled.signal, "SIGKILL");
 });
 
+test("keeps Claude delegation inactive until explicitly armed and disarms it after use", () => {
+  type Handler = (...args: unknown[]) => unknown;
+  let activeTools = ["read", "claude"];
+  let sessionStart: Handler | undefined;
+  let toolResult: Handler | undefined;
+  let commandHandler: ((args: string, ctx: unknown) => unknown) | undefined;
+  let toolDefinition: { description: string; promptGuidelines?: string[] } | undefined;
+  const notifications: string[] = [];
+
+  registerClaude({
+    on(event: string, handler: Handler) {
+      if (event === "session_start") sessionStart = handler;
+      if (event === "tool_result") toolResult = handler;
+    },
+    getActiveTools() {
+      return activeTools;
+    },
+    setActiveTools(names: string[]) {
+      activeTools = names;
+    },
+    registerCommand(name: string, command: { handler: (args: string, ctx: unknown) => unknown }) {
+      if (name === "claude-tool") commandHandler = command.handler;
+    },
+    registerTool(definition: { description: string; promptGuidelines?: string[] }) {
+      toolDefinition = definition;
+    },
+  } as unknown as ExtensionAPI);
+
+  assert.ok(sessionStart);
+  sessionStart();
+  assert.deepEqual(activeTools, ["read"]);
+
+  assert.ok(commandHandler);
+  const ctx = {
+    ui: {
+      notify(message: string) {
+        notifications.push(message);
+      },
+    },
+  };
+  commandHandler("on", ctx);
+  assert.deepEqual(activeTools, ["read", "claude"]);
+  assert.match(notifications.at(-1) ?? "", /armed for one invocation/);
+
+  assert.ok(toolResult);
+  assert.equal(toolResult({ toolName: "claude", details: { failed: false } }), undefined);
+  assert.deepEqual(activeTools, ["read"]);
+
+  assert.match(toolDefinition?.description ?? "", /only when the user explicitly requests/);
+  assert.match(toolDefinition?.promptGuidelines?.[0] ?? "", /Do not use claude for routine/);
+});
+
 test("marks failed Claude tool results as errors without discarding their payload", () => {
+  let activeTools = ["read", "claude"];
   let handler: ((event: { toolName: string; details: unknown }) => unknown) | undefined;
 
   registerClaude({
     on(event: string, candidate: typeof handler) {
       if (event === "tool_result") handler = candidate;
     },
+    getActiveTools() {
+      return activeTools;
+    },
+    setActiveTools(names: string[]) {
+      activeTools = names;
+    },
+    registerCommand() {},
     registerTool() {},
   } as unknown as ExtensionAPI);
 
@@ -168,5 +228,5 @@ test("marks failed Claude tool results as errors without discarding their payloa
   assert.deepEqual(handler({ toolName: "claude", details: { failed: true } }), {
     isError: true,
   });
-  assert.equal(handler({ toolName: "claude", details: { failed: false } }), undefined);
+  assert.deepEqual(activeTools, ["read"]);
 });
