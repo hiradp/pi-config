@@ -1,11 +1,19 @@
 ---
 name: review
-description: Review a pull request, current diff, branch, file, or design document for correctness, safety, tests, compatibility, and operational impact. Use for initial reviews and focused re-reviews; remain read-only unless the user explicitly asks to fix findings.
+description: Review a pull request, diff, branch, file, or design document only when the user explicitly asks for a review or re-review. Do not use for implementation, exploration, general codebase analysis, or routine self-checking. Remain read-only unless the user explicitly asks to fix findings.
 ---
 
 # Review
 
 Perform a findings-first technical review grounded in the repository and the exact target under review.
+
+## Delegation boundary
+
+- This skill does not authorize subagent use. Review directly in the current session unless the user invokes `/review-code` or `/review-plan`.
+- Those templates each authorize exactly one parallel subagent call and one review pass. A further pass requires a new, explicit user request.
+- Never invoke reviewer subagents for implementation, general analysis, exploration, call tracing, research, or routine post-change validation.
+- Never substitute `code-reviewer` or `plan-reviewer` for an unknown or unavailable agent. Do not guess agent names.
+- Do not run an autonomous review/fix/re-review loop within one user request.
 
 ## Default to read-only
 
@@ -164,7 +172,7 @@ If there are no confirmed findings, say `No confirmed findings.` and still repor
 
 ## Re-review mode
 
-Use re-review mode when the user says the change was updated, asks for another round, or provides prior reviewer feedback.
+Use re-review mode only when the user explicitly says the change was updated, asks for another review round, or asks to evaluate prior reviewer feedback. Fixing a finding does not by itself authorize another review pass.
 
 1. Recover the previous review's head SHA, findings, questions, and stated limitations from the conversation when available.
 2. Determine the new head SHA and inspect the delta since the previous review, not only the full base diff.
@@ -188,6 +196,6 @@ Enter fix mode only after an explicit request to fix, apply, or address findings
 - Preserve unrelated and pre-existing work.
 - Make the smallest coherent correction for each approved finding.
 - Add or update tests that demonstrate the corrected behavior.
-- Re-run relevant checks and re-review the resulting diff.
+- Run relevant deterministic checks and inspect the resulting diff directly. Do not launch reviewer subagents or another full review pass unless the user explicitly asks for a re-review in a later request.
 - Report remaining findings and unresolved risks honestly.
 - Do not commit, push, post, or update a PR unless separately requested through the appropriate workflow.
