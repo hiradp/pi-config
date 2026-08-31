@@ -46,6 +46,7 @@
 /agents/*
 !/agents/code-reviewer.md
 !/agents/plan-reviewer.md
+!/agents/worker.md
 
 !/prompts/
 /prompts/*
