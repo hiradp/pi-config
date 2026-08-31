@@ -4,6 +4,8 @@ This extension is vendored from Pi's official [subagent example](https://github.
 
 It adds a `subagent` tool that can run user-defined agents in isolated Pi processes, either individually, in parallel, or as a chain. Each invocation may select a model; selection precedence is invocation, agent definition, then the dispatching session. Usage from child model calls is included in parent-session accounting, and any failed child marks the complete tool result as failed while preserving its diagnostics.
 
+While children are active, the tool renders a stable dashboard with queued/running/completed/failed states, each child's latest action, elapsed time, turns, output tokens, cost, and model. Completed output stays collapsed until the tool-detail keybinding is used.
+
 ## Local agents
 
 - [`worker`](../../agents/worker.md) implements focused delegated tasks with the dispatching session's model and default tools. It shares the selected working directory with the parent and sibling agents, so parallel workers should receive non-overlapping scopes.

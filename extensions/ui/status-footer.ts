@@ -338,23 +338,46 @@ async function loadProviderQuota(
   return null;
 }
 
-/** Session cost in dollars, matching Pi's default footer accounting. */
-export function sessionCost(ctx: ExtensionContext): number {
-  let cost = 0;
+export interface SessionCosts {
+  total: number;
+  main: number;
+  subagents: number;
+  hasSubagents: boolean;
+}
+
+/** Session costs in dollars, with subagent usage separated from the parent session. */
+export function sessionCosts(ctx: ExtensionContext): SessionCosts {
+  let main = 0;
+  let subagents = 0;
+  let hasSubagents = false;
+
   for (const entry of ctx.sessionManager.getEntries()) {
     if (entry.type === "message" && entry.message.role === "assistant") {
-      cost += entry.message.usage?.cost?.total ?? 0;
-    } else if (
-      entry.type === "message" &&
-      entry.message.role === "toolResult" &&
-      entry.message.usage
-    ) {
-      cost += entry.message.usage.cost.total;
+      main += entry.message.usage?.cost?.total ?? 0;
+      if (
+        entry.message.content.some((part) => part.type === "toolCall" && part.name === "subagent")
+      ) {
+        hasSubagents = true;
+      }
+    } else if (entry.type === "message" && entry.message.role === "toolResult") {
+      const cost = entry.message.usage?.cost.total ?? 0;
+      if (entry.message.toolName === "subagent") {
+        hasSubagents = true;
+        subagents += cost;
+      } else {
+        main += cost;
+      }
     } else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
-      cost += entry.usage.cost?.total ?? 0;
+      main += entry.usage.cost?.total ?? 0;
     }
   }
-  return cost;
+
+  return { total: main + subagents, main, subagents, hasSubagents };
+}
+
+/** Session cost in dollars, matching Pi's default footer accounting. */
+export function sessionCost(ctx: ExtensionContext): number {
+  return sessionCosts(ctx).total;
 }
 
 function formatWindow(size: number): string {
@@ -576,9 +599,16 @@ export default function (pi: ExtensionAPI) {
             parts.push(quotaPart);
           }
 
-          const cost = sessionCost(ctx);
-          if (cost > 0) {
-            parts.push(theme.fg("dim", `$${cost.toFixed(3)}`));
+          const costs = sessionCosts(ctx);
+          if (costs.hasSubagents) {
+            parts.push(
+              theme.fg(
+                "dim",
+                `$${costs.total.toFixed(3)} total · $${costs.main.toFixed(3)} main · $${costs.subagents.toFixed(3)} agents`,
+              ),
+            );
+          } else if (costs.total > 0) {
+            parts.push(theme.fg("dim", `$${costs.total.toFixed(3)}`));
           }
 
           return [truncateToWidth(parts.join(sep), width, theme.fg("dim", "..."))];

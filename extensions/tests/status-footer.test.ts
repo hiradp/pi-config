@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { compactDirectory, modelDisplayName, sessionCost } from "../ui/status-footer.ts";
+import {
+  compactDirectory,
+  modelDisplayName,
+  sessionCost,
+  sessionCosts,
+} from "../ui/status-footer.ts";
 
 test("compacts nested workspace paths", () => {
   assert.equal(
@@ -28,6 +33,77 @@ test("uses the model name and falls back to the final id segment", () => {
   assert.equal(modelDisplayName(undefined), "no-model");
 });
 
+test("detects subagent sessions before child usage is available", () => {
+  const ctx = {
+    sessionManager: {
+      getEntries() {
+        return [
+          {
+            type: "message",
+            message: {
+              role: "assistant",
+              content: [{ type: "toolCall", name: "subagent", arguments: {} }],
+              usage: { cost: { total: 0.5 } },
+            },
+          },
+        ];
+      },
+    },
+  } as unknown as ExtensionContext;
+
+  assert.deepEqual(sessionCosts(ctx), {
+    total: 0.5,
+    main: 0.5,
+    subagents: 0,
+    hasSubagents: true,
+  });
+});
+
+test("ordinary nested tool usage remains attributed to the main session", () => {
+  const ctx = {
+    sessionManager: {
+      getEntries() {
+        return [
+          {
+            type: "message",
+            message: {
+              role: "assistant",
+              content: [
+                { type: "toolCall", name: "subagent", arguments: {} },
+                { type: "toolCall", name: "summarize", arguments: {} },
+              ],
+              usage: { cost: { total: 1 } },
+            },
+          },
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "summarize",
+              usage: { cost: { total: 0.75 } },
+            },
+          },
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "subagent",
+              usage: { cost: { total: 2.25 } },
+            },
+          },
+        ];
+      },
+    },
+  } as unknown as ExtensionContext;
+
+  assert.deepEqual(sessionCosts(ctx), {
+    total: 4,
+    main: 1.75,
+    subagents: 2.25,
+    hasSubagents: true,
+  });
+});
+
 test("session cost includes all persisted usage", () => {
   const ctx = {
     sessionManager: {
@@ -35,11 +111,19 @@ test("session cost includes all persisted usage", () => {
         return [
           {
             type: "message",
-            message: { role: "assistant", usage: { cost: { total: 1 } } },
+            message: {
+              role: "assistant",
+              content: [{ type: "toolCall", name: "subagent", arguments: {} }],
+              usage: { cost: { total: 1 } },
+            },
           },
           {
             type: "message",
-            message: { role: "toolResult", usage: { cost: { total: 2 } } },
+            message: {
+              role: "toolResult",
+              toolName: "subagent",
+              usage: { cost: { total: 2 } },
+            },
           },
           { type: "branch_summary", usage: { cost: { total: 3 } } },
           { type: "compaction", usage: { cost: { total: 4 } } },
@@ -49,4 +133,10 @@ test("session cost includes all persisted usage", () => {
   } as unknown as ExtensionContext;
 
   assert.equal(sessionCost(ctx), 10);
+  assert.deepEqual(sessionCosts(ctx), {
+    total: 10,
+    main: 8,
+    subagents: 2,
+    hasSubagents: true,
+  });
 });

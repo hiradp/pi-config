@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { test } from "node:test";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import registerSubagent, {
   classifyChildExit,
   combineUsage,
+  DashboardTimerRegistry,
+  formatElapsed,
+  formatParallelProgress,
   hasFailedSubagentResult,
   resolveDispatchConfig,
+  resultStatus,
+  sanitizeDashboardText,
+  signalProcessTree,
   truncateOutput,
 } from "../subagent/index.ts";
 
@@ -156,4 +164,450 @@ test("marks subagent tool results as errors without discarding details or usage"
     undefined,
   );
   assert.equal(handler({ toolName: "other", details: { results: [{ exitCode: 1 }] } }), undefined);
+});
+
+test("formats compact subagent elapsed times", () => {
+  assert.equal(formatElapsed(9_999), "9s");
+  assert.equal(formatElapsed(65_000), "1m 05s");
+  assert.equal(formatElapsed(3_720_000), "1h 02m");
+});
+
+test("derives child states and reports queued parallel work separately", () => {
+  const base = {
+    agent: "reviewer",
+    agentSource: "user" as const,
+    task: "Review",
+    exitCode: -1,
+    messages: [],
+    stderr: "",
+    usage: {
+      total: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      contextTokens: 0,
+      turns: 0,
+    },
+  };
+  const queued = { ...base };
+  const running = { ...base, startedAt: Date.now() };
+  const completed = { ...base, exitCode: 0 };
+  const failed = { ...base, exitCode: 1 };
+
+  assert.equal(resultStatus(queued), "queued");
+  assert.equal(resultStatus(running), "running");
+  assert.equal(resultStatus(completed), "completed");
+  assert.equal(resultStatus(failed), "failed");
+  assert.equal(
+    formatParallelProgress([queued, running, completed, failed]),
+    "Parallel: 2/4 done, 1 running, 1 queued...",
+  );
+});
+
+test("removes terminal sequences and C0/C1 controls from dashboard text", () => {
+  const unsafe =
+    "safe\u001bc reset \u001b[2Acursor \u009b3BC1 \u0007bell \u001b]52;c;clipboard\u0007done";
+  const sanitized = sanitizeDashboardText(unsafe);
+
+  assert.equal(sanitized, "safe reset cursor C1 bell done");
+  assert.equal(
+    Array.from(sanitized).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+    }),
+    false,
+  );
+});
+
+test("dashboard timer registry reuses and tears down timers", () => {
+  const active = new Map<number, () => void>();
+  let nextTimer = 1;
+  const registry = new DashboardTimerRegistry({
+    set(callback) {
+      const timer = nextTimer++;
+      active.set(timer, callback);
+      return timer as unknown as ReturnType<typeof setInterval>;
+    },
+    clear(timer) {
+      active.delete(timer as unknown as number);
+    },
+  });
+
+  registry.update("first", true, () => {});
+  registry.update("first", true, () => {});
+  registry.update("second", true, () => {});
+  assert.equal(registry.size, 2);
+  assert.equal(active.size, 2);
+
+  registry.clear("first");
+  assert.equal(registry.size, 1);
+  registry.clearAll();
+  assert.equal(registry.size, 0);
+  assert.equal(active.size, 0);
+});
+
+test(
+  "signals the detached subagent process group",
+  { skip: process.platform === "win32" },
+  async () => {
+    const grandchildScript =
+      "process.on('SIGTERM',()=>process.stdout.write('grandchild-term\\n'));process.stdout.write('grandchild-ready\\n');setInterval(()=>{},1000)";
+    const parentScript = [
+      "const {spawn}=require('node:child_process')",
+      `const child=spawn(process.execPath,['-e',${JSON.stringify(grandchildScript)}],{stdio:['ignore','inherit','ignore']})`,
+      "console.log('grandchild:'+child.pid)",
+      "process.on('SIGTERM',()=>process.stdout.write('parent-term\\n'))",
+      "setInterval(()=>{},1000)",
+    ].join(";");
+    const child = spawn(process.execPath, ["-e", parentScript], {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    let output = "";
+    child.stdout.on("data", (data) => {
+      output += data.toString();
+    });
+    const waitFor = async (pattern: RegExp) => {
+      for (let attempt = 0; attempt < 100 && !pattern.test(output); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.match(output, pattern);
+    };
+
+    try {
+      await waitFor(/grandchild:\d+/);
+      await waitFor(/grandchild-ready/);
+      assert.ok(child.pid);
+      signalProcessTree(child.pid, "SIGTERM");
+      await waitFor(/parent-term/);
+      await waitFor(/grandchild-term/);
+    } finally {
+      if (child.pid) signalProcessTree(child.pid, "SIGKILL");
+      await closed;
+    }
+  },
+);
+
+test("expanded results preserve early failures and identify unrun chain steps", () => {
+  type Renderer = (
+    result: { content: Array<{ type: "text"; text: string }>; details: unknown },
+    options: { expanded: boolean; isPartial: boolean },
+    theme: Theme,
+    context: {
+      state: Record<string, unknown>;
+      lastComponent: unknown;
+      invalidate: () => void;
+      toolCallId: string;
+    },
+  ) => { render(width: number): string[] };
+
+  let renderResult: Renderer | undefined;
+  registerSubagent({
+    on() {},
+    registerTool(definition: { renderResult?: Renderer }) {
+      renderResult = definition.renderResult;
+    },
+  } as unknown as ExtensionAPI);
+  assert.ok(renderResult);
+
+  const usage = {
+    total: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    contextTokens: 0,
+    turns: 0,
+  };
+  const failed = {
+    agent: "worker",
+    agentSource: "user",
+    task: "Start work",
+    exitCode: 1,
+    messages: [],
+    stderr: "spawn failed\u001b[2A",
+    usage,
+    step: 1,
+  };
+  const queued = {
+    agent: "reviewer",
+    agentSource: "user",
+    task: "Review {previous}",
+    exitCode: -1,
+    messages: [],
+    stderr: "",
+    usage,
+    model: "anthropic/claude-sonnet-5",
+    step: 2,
+  };
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const context = {
+    state: {},
+    lastComponent: undefined,
+    invalidate() {},
+    toolCallId: "restored",
+  };
+
+  const parallel = renderResult(
+    {
+      content: [{ type: "text", text: "failed" }],
+      details: {
+        mode: "parallel",
+        agentScope: "user",
+        projectAgentsDir: null,
+        results: [failed],
+      },
+    },
+    { expanded: true, isPartial: false },
+    theme,
+    context,
+  )
+    .render(100)
+    .join("\n");
+  assert.match(parallel, /Error: spawn failed/);
+  assert.equal(parallel.includes("\u001b[2A"), false);
+
+  const chain = renderResult(
+    {
+      content: [{ type: "text", text: "failed" }],
+      details: {
+        mode: "chain",
+        agentScope: "user",
+        projectAgentsDir: null,
+        results: [failed, queued],
+      },
+    },
+    { expanded: true, isPartial: false },
+    theme,
+    { ...context, toolCallId: "chain" },
+  )
+    .render(100)
+    .join("\n");
+  assert.match(chain, /Step 2: reviewer/);
+  assert.match(chain, /\(not run\)/);
+});
+
+test("renders restored legacy usage details", () => {
+  let renderResult: any;
+  registerSubagent({
+    on() {},
+    registerTool(definition: { renderResult?: unknown }) {
+      renderResult = definition.renderResult;
+    },
+  } as unknown as ExtensionAPI);
+
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const component = renderResult(
+    {
+      content: [{ type: "text", text: "restored" }],
+      details: {
+        mode: "single",
+        agentScope: "user",
+        projectAgentsDir: null,
+        results: [
+          {
+            agent: "legacy",
+            agentSource: "user",
+            task: "Old task",
+            exitCode: 0,
+            messages: [],
+            stderr: "",
+            usage: {
+              input: 10,
+              output: 20,
+              cacheRead: 0,
+              cacheWrite: 0,
+              cost: 0.5,
+              contextTokens: 30,
+              turns: 2,
+            },
+            model: "provider/old-model",
+          },
+        ],
+      },
+    },
+    { expanded: false, isPartial: false },
+    theme,
+    { state: {}, lastComponent: undefined, invalidate() {}, toolCallId: "legacy" },
+  );
+
+  assert.match(component.render(100).join("\n"), /2 turns · ↓20 · \$0\.5000 · old-model/);
+});
+
+test("renders running subagents as a stable dashboard", () => {
+  type Renderer = (
+    result: { content: Array<{ type: "text"; text: string }>; details: unknown },
+    options: { expanded: boolean; isPartial: boolean },
+    theme: Theme,
+    context: {
+      state: Record<string, unknown>;
+      lastComponent: unknown;
+      invalidate: () => void;
+    },
+  ) => { render(width: number): string[] };
+
+  let renderResult: Renderer | undefined;
+  const handlers = new Map<string, (event: any) => void>();
+  const activeTimers = new Set<ReturnType<typeof setInterval>>();
+  let nextTimer = 1;
+  registerSubagent(
+    {
+      on(event: string, handler: (event: any) => void) {
+        handlers.set(event, handler);
+      },
+      registerTool(definition: { renderResult?: Renderer }) {
+        renderResult = definition.renderResult;
+      },
+    } as unknown as ExtensionAPI,
+    {
+      set() {
+        const timer = nextTimer++ as unknown as ReturnType<typeof setInterval>;
+        activeTimers.add(timer);
+        return timer;
+      },
+      clear(timer) {
+        activeTimers.delete(timer);
+      },
+    },
+  );
+  assert.ok(renderResult);
+
+  const usage = {
+    total: {
+      input: 2000,
+      output: 1200,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 3200,
+      cost: { input: 0, output: 0.0123, cacheRead: 0, cacheWrite: 0, total: 0.0123 },
+    },
+    contextTokens: 3200,
+    turns: 2,
+  };
+  const runningDetails = {
+    mode: "parallel",
+    agentScope: "user",
+    projectAgentsDir: null,
+    results: [
+      {
+        agent: "code-reviewer",
+        agentSource: "user",
+        task: "Review correctness and completeness",
+        exitCode: -1,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                name: "bash",
+                arguments: { command: "echo first\n\u001b[31mecho second\u001b[0m" },
+              },
+            ],
+          },
+        ],
+        stderr: "",
+        usage,
+        model: "openai-codex/gpt-5.6-sol",
+        startedAt: Date.now(),
+      },
+      {
+        agent: "plan-reviewer",
+        agentSource: "unknown",
+        task: "Review the implementation plan",
+        exitCode: -1,
+        messages: [],
+        stderr: "",
+        usage: { ...usage, turns: 0 },
+        model: "openai-codex/gpt-5.6-sol",
+      },
+    ],
+  };
+  const finalDetails = {
+    ...runningDetails,
+    results: runningDetails.results.map((result) => ({
+      ...result,
+      exitCode: 0,
+      completedAt: Date.now(),
+    })),
+  };
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const state: Record<string, unknown> = {};
+  const context = {
+    state,
+    lastComponent: undefined,
+    invalidate() {},
+    toolCallId: "subagent-call",
+  };
+
+  try {
+    const component = renderResult(
+      { content: [{ type: "text", text: "running" }], details: runningDetails },
+      { expanded: false, isPartial: true },
+      theme,
+      context,
+    );
+    const lines = component.render(100);
+    const dashboard = lines.join("\n");
+
+    assert.equal(activeTimers.size, 1);
+    assert.match(dashboard, /0\/2 finished · 1 running · 1 queued/);
+    assert.match(dashboard, /code-reviewer\s+\$ echo first echo second/);
+    assert.equal(dashboard.includes("\u001b[31m"), false);
+    assert.ok(lines.every((line) => !line.includes("\n") && !line.includes("\r")));
+    assert.match(dashboard, /Review correctness and completeness/);
+    assert.match(dashboard, /2 turns · ↓1\.2k · \$0\.0123 · gpt-5\.6-sol/);
+    assert.match(dashboard, /plan-reviewer\s+waiting.*queued · gpt-5\.6-sol/);
+    assert.ok(lines.every((line) => visibleWidth(line) <= 100));
+    assert.ok(component.render(32).every((line) => visibleWidth(line) <= 32));
+
+    renderResult(
+      { content: [{ type: "text", text: "running" }], details: runningDetails },
+      { expanded: false, isPartial: true },
+      theme,
+      context,
+    );
+    assert.equal(activeTimers.size, 1);
+    handlers.get("tool_execution_end")?.({
+      toolName: "subagent",
+      toolCallId: "subagent-call",
+    });
+    assert.equal(activeTimers.size, 0);
+
+    renderResult(
+      { content: [{ type: "text", text: "running" }], details: runningDetails },
+      { expanded: false, isPartial: true },
+      theme,
+      context,
+    );
+    assert.equal(activeTimers.size, 1);
+    handlers.get("session_shutdown")?.({});
+    assert.equal(activeTimers.size, 0);
+  } finally {
+    const finalComponent = renderResult(
+      { content: [{ type: "text", text: "done" }], details: finalDetails },
+      { expanded: false, isPartial: false },
+      theme,
+      context,
+    );
+    assert.equal(activeTimers.size, 0);
+    assert.match(finalComponent.render(100).join("\n"), /2\/2 complete/);
+  }
 });

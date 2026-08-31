@@ -18,7 +18,7 @@ Personal configuration, extensions, and skills for [Pi](https://pi.dev).
 - **[Subagent](extensions/subagent/README.md)** — runs isolated, model-selectable agents individually, in parallel, or as a chain. Includes a general-purpose implementation worker plus plan and code review passes using Sol and Kimi K3.
 - **Usage** — `/usage` shows token usage, cost, and recent trends from Pi sessions.
 - **Working message** — displays live request progress, token counts, and thinking time, then records a compact completion entry.
-- **Footer** — custom status footer with model, context, cost, quota, and pull-request information where available.
+- **Footer** — custom status footer with model, context, cost, quota, and pull-request information where available. Sessions that invoke subagents split cost into total, main-session, and subagent amounts.
 
 ### Skills
 
