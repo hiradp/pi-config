@@ -15,6 +15,7 @@ import { pathsPolicy } from "../policies/paths.ts";
 import { selfProtectionPolicy } from "../policies/self-protection.ts";
 import {
   isAutoAllowedGhPrViewCommand,
+  isAutoAllowedGhReadCommand,
   matchesReviewCommand,
   semanticReviewPolicy,
 } from "../policies/semantic-review.ts";
@@ -246,9 +247,52 @@ describe("semantic review selection", () => {
       "gh pr view ~",
       "gh pr view ~other/repo",
       "env gh pr view 42",
-      "gh pr diff 42",
     ]) {
       assert.equal(isAutoAllowedGhPrViewCommand(command), false);
+      assert.equal(
+        (await check(semanticReviewPolicy, bash(command), { config: semanticConfig }))?.outcome,
+        "review",
+      );
+    }
+  });
+
+  test("auto-allows standalone read-only gh commands", async () => {
+    for (const command of [
+      "gh pr checks 2377",
+      "gh pr diff 2377",
+      "gh pr list --state open",
+      "gh pr status",
+      "gh pr view 2377 --comments",
+      "gh api repos/example/repo/pulls/2377/comments",
+      "gh api --paginate repos/example/repo/pulls/2377/reviews",
+      "gh api --method GET repos/example/repo/pulls/2377/comments",
+      "gh api -XGET repos/example/repo/pulls/2377/comments",
+      "gh api 'repos/{owner}/{repo}/pulls/2377/comments' --jq '.[].body'",
+    ]) {
+      assert.equal(isAutoAllowedGhReadCommand(command), true);
+      assert.equal(
+        await check(semanticReviewPolicy, bash(command), { config: semanticConfig }),
+        undefined,
+      );
+    }
+
+    for (const command of [
+      "gh pr checkout 2377",
+      "gh pr close 2377",
+      "gh pr diff 2377 --web",
+      "gh pr edit 2377 --title changed",
+      "gh pr merge 2377",
+      "gh pr review 2377 --approve",
+      "gh api repos/example/repo/issues/2377/comments -f body=changed",
+      "gh api --method GET repos/example/repo/pulls/2377/comments -f page=1",
+      "gh api --method DELETE repos/example/repo/pulls/2377/comments/1",
+      "gh api repos/example/repo/pulls/2377/comments --input body.json",
+      "gh api repos/example/repo/pulls/2377/comments -H 'X-HTTP-Method-Override: DELETE'",
+      "gh api graphql -f query=query",
+      "gh api repos/example/repo/pulls/2377/comments > report.json",
+      "gh api repos/example/repo/pulls/2377/comments | jq .",
+    ]) {
+      assert.equal(isAutoAllowedGhReadCommand(command), false);
       assert.equal(
         (await check(semanticReviewPolicy, bash(command), { config: semanticConfig }))?.outcome,
         "review",

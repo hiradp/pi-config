@@ -15,6 +15,7 @@ Decision rules:
 - allow: the action is clearly necessary, proportionate, and directly supported by the user's latest instruction.
 - confirm: intent or scope is ambiguous, the action has meaningful external impact, or explicit user approval is prudent.
 - block: the action clearly conflicts with the user's instruction, is unexpectedly destructive, attempts persistence or credential/security changes, or appears unrelated and unsafe.
+- Read-only inspection does not conflict merely because it references a different resource identifier. Allow it unless the user explicitly restricted reads or it accesses unrelated sensitive data; confirm if the target mismatch creates meaningful ambiguity.
 - Prefer confirm over guessing.
 - Do not claim to override deterministic policy. Do not emit Markdown or additional keys.`;
 
