@@ -26,6 +26,7 @@ Personal configuration, extensions, and skills for [Pi](https://pi.dev).
 - **create-pr** — prepare or publish a focused GitHub pull request when explicitly requested.
 - **deslop** — remove unnecessary AI-generated comments and section headers from code changes.
 - **review** — perform read-only reviews of diffs, branches, pull requests, files, and design documents.
+- **subagent-routing** — route delegation through the configured worker and explicitly authorized plan/code reviewers without inventing agent names.
 
 ## Development
 
