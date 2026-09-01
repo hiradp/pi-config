@@ -24,7 +24,9 @@ Do not invent specialized names such as `explorer`, `investigator`, `implementat
 3. Use `code-reviewer` only when the `/review-code` template authorizes the invocation. Do not use it for routine post-change self-review.
 4. Default to `agentScope: "user"`. Use project agents only when the user explicitly requests them and their exact names have been discovered.
 5. Never set `confirmProjectAgents: false`. Preserve the confirmation for project-local agents.
-6. An unknown-agent or `Unsupported task:` result means no delegation occurred. Do not describe it as a successful review or completed work.
-7. After a failed dispatch, use only an exact name listed by the tool. Never retry with another guessed name.
+6. Treat an unknown agent, `Unsupported task:`, failed, aborted, length-limited, or missing child result as a failed dispatch. Do not describe that scope as reviewed or completed.
+7. If a parallel invocation partially fails, use only the successful children's output and identify every scope that was not completed. Never infer findings or completion for a failed child.
+8. After a failed dispatch, use only an exact name listed by the tool. Never retry with another guessed name.
+9. Do not claim `No confirmed findings`, successful review, or completed delegated work unless every required child returned usable output.
 
 Parallel tasks may invoke `worker` more than once when their scopes are independent and non-overlapping.

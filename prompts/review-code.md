@@ -10,7 +10,8 @@ Run exactly one read-only review pass over ${@:-the current working-tree change}
    - model `openai-codex/gpt-5.6-sol`, with primary focus `correctness/completeness`
    - model `fireworks/accounts/fireworks/models/kimi-k3`, with primary focus `simplicity`
 3. Start each delegated task with `Review authorization: /review-code` and its exact `Primary focus:` value. Give each isolated reviewer the target, original intent and requirements, relevant scope context, and prior findings when present. Do not tell either reviewer about the other's output.
-4. After both return, verify every alleged finding against the current code and review target. Deduplicate overlapping findings, discard ungrounded claims and style preferences, and preserve meaningful disagreements as questions.
-5. Report confirmed findings first, ordered by severity, and identify which model or models raised each one. Then report questions, prior-finding dispositions, testing gaps, and review coverage when applicable. If nothing remains after verification, say `No confirmed findings.`
+4. Confirm that both children returned usable review output. Treat an unknown agent, `Unsupported task:`, failed, aborted, length-limited, or missing child result as a failed review pass. If either pass failed, identify the failed pass and stop without retrying, synthesizing findings, or saying `No confirmed findings.`
+5. After both succeed, verify every alleged finding against the current code and review target. Deduplicate overlapping findings, discard ungrounded claims and style preferences, and preserve meaningful disagreements as questions.
+6. Report confirmed findings first, ordered by severity, and identify which model or models raised each one. Then report questions, prior-finding dispositions, testing gaps, and review coverage when applicable. If nothing remains after verification, say `No confirmed findings.`
 
 Do not modify code, Git state, or external systems. Stop after presenting the synthesized review so feedback can be addressed in the original session. Do not automatically re-review fixes; another pass requires a new, explicit user request.
