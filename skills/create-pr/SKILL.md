@@ -33,6 +33,16 @@ Create one focused pull request from the current repository while preserving the
 6. Account for every uncommitted change. When the user requested an end-to-end implementation followed by a PR, task-scoped commits are allowed. For a standalone "open a PR" request, do not silently absorb unrelated or unexplained changes.
 7. Run the repository's required checks, plus proportionate checks for the changed area. Never claim a check passed unless it was run successfully.
 
+## High-risk readiness
+
+Load and follow the `high-risk-completion` skill when a defect in the change could cause an outage, data loss, security exposure, unsafe rollout, or major compatibility break.
+
+- An implementation or PR request does not authorize `/review-code` or reviewer subagents.
+- A high-risk change without a current successful independent review is not review-ready or merge-ready, even when checks pass and GitHub reports it as conflict-free.
+- When the user requests a PR without specifying draft or ready status, publish an unreviewed high-risk change as a draft and report that independent review is pending.
+- If the user explicitly requests a ready PR before review, explain the missing gate and ask whether to publish a draft or intentionally bypass it.
+- Do not mark an existing draft ready until the gate passes or the user explicitly confirms an override.
+
 ## Title and description
 
 - Inspect recent repository PR titles when necessary to match local conventions.
@@ -65,7 +75,7 @@ Add another section only when it contains relevant, non-routine information.
 2. Push only the current non-default feature branch with a normal push. Never use `--force` or `--force-with-lease` unless the user separately and explicitly requests it and guardrails allow it.
 3. Keep external mutations in separate commands. Do not chain a push, PR creation, comments, edits, or other GitHub mutations together.
 4. Create exactly one PR with the selected head, base, title, body, and draft status. Use a temporary body file when it avoids quoting errors.
-5. Create a draft PR only when requested or when the user explicitly establishes draft-first workflow for the task.
+5. Create a draft PR only when requested, when the user explicitly establishes draft-first workflow, or when the `high-risk-completion` gate requires an unreviewed change to remain draft.
 6. Do not add labels, reviewers, assignees, comments, or project metadata unless requested.
 7. Verify the result with a read-only PR lookup and inspect local status. Verification is a follow-up check, not a second attempt to create or mutate the PR.
 
@@ -80,4 +90,5 @@ Report concisely:
 - draft or ready status
 - commits or files included at a high level
 - checks run and their results
+- independent-review status for a high-risk change, including the reviewed revision when applicable
 - any remaining local changes, failures, or follow-up actions

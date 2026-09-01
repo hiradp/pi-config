@@ -25,6 +25,7 @@ Personal configuration, extensions, and skills for [Pi](https://pi.dev).
 - **commit** — inspect, organize, and create focused local Git commits.
 - **create-pr** — prepare or publish a focused GitHub pull request when explicitly requested.
 - **deslop** — remove unnecessary AI-generated comments and section headers from code changes.
+- **high-risk-completion** — gate production-sensitive readiness claims and ready PRs on a current independent review.
 - **review** — perform read-only reviews of diffs, branches, pull requests, files, and design documents.
 - **subagent-routing** — route delegation through the configured worker and explicitly authorized plan/code reviewers without inventing agent names.
 
