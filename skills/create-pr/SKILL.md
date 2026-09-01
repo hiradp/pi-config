@@ -41,7 +41,8 @@ Create one focused pull request from the current repository while preserving the
 - Follow the PR template rather than inventing a competing format.
 - Explain the reason for the change and the meaningful implementation details.
 - Do not add a testing section for routine unit or integration tests, linters, type checks, builds, or other validation expected to run in CI.
-- Mention testing only when a novel, manual, or environment-specific check gives reviewers information that CI does not. Describe the behavior and result briefly; do not paste commands, flags, counts, timings, or terminal output.
+- If the repository template requires a testing section, preserve it. When only routine validation was performed, write `CI.` and never enumerate routine commands or checks.
+- Add testing details only when a novel, manual, or environment-specific check gives reviewers information that CI does not. Describe the behavior and result briefly; do not paste commands, flags, counts, timings, or terminal output.
 - Disclose a failing or intentionally skipped required check only when it creates review or merge risk; do not add boilerplate such as "full test suite not run."
 - Do not invent a security section. If the repository template asks for security impact and there is none, answer only `None.` without justification or reassurance. If there is a material security impact, state it and any mitigation concisely.
 - Mention risk, rollout, compatibility, or follow-up work only when relevant.
