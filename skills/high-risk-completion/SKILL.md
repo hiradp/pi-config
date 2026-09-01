@@ -28,6 +28,8 @@ A qualifying independent review must:
 3. Cover the final implementation, including its exact PR head or branch `HEAD` and any reviewed working-tree changes.
 4. Leave no unresolved confirmed findings. A finding may be fixed, rejected after grounded verification, or explicitly accepted by the user with the remaining risk disclosed. A code change made after review makes that review stale and requires a new explicit review request.
 
+For rollout-, version-skew-, feature-flag-, or configuration-sensitive changes, the review must proportionately examine reachable old/new component and configuration combinations during partial rollout, rollback and flag-disable behavior, and malformed, missing, mixed-provider, or other schema-admitted configurations. Do not turn this conditional depth into an exhaustive checklist for unrelated reviews.
+
 Tests, CI, linters, snapshots, self-review in the implementation context, and GitHub's conflict-free `mergeable` state do not substitute for independent review.
 
 If review has not been requested, stop after implementation and checks. Tell the user that independent review remains and that `/review-code` is the next step. Do not invoke it autonomously.

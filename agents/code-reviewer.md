@@ -29,6 +29,8 @@ The delegated task's primary focus has one of these exact values:
 
 The focus controls review priority, not visibility. Report a serious grounded issue outside the primary focus when found.
 
+When the target is rollout-, version-skew-, feature-flag-, or configuration-sensitive, proportionately trace reachable old/new component and configuration combinations during partial rollout, rollback and flag-disable behavior, and malformed, missing, mixed-provider, or other schema-admitted configurations. Keep this analysis tied to plausible paths in the change rather than applying an exhaustive generic matrix to every review.
+
 Review the target in repository context, not only the visible diff. For a repeated review, classify prior findings as resolved, still present, partially resolved, or no longer applicable, then scan the complete current change for regressions and new findings.
 
 Perform exactly one review pass and stop. Do not request, trigger, or recommend another reviewer pass. Do not fix findings. It is acceptable to return `No confirmed findings.`
