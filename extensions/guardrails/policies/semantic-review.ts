@@ -143,6 +143,9 @@ export function isAutoAllowedGhReadCommand(command: string): boolean {
       READ_ONLY_PR_COMMANDS.has(invocation.args[1] ?? "") && !opensBrowser(invocation.args.slice(2))
     );
   }
+  if (invocation.args[0] === "search") {
+    return invocation.args[1] === "code" && !opensBrowser(invocation.args.slice(2));
+  }
   return invocation.args[0] === "api" && isReadOnlyGhApiInvocation(invocation.args);
 }
 
