@@ -143,10 +143,6 @@ export class SlackAuth {
     return this.revisionValue;
   }
 
-  get loginActive(): boolean {
-    return this.loginController !== undefined;
-  }
-
   async hasClientId(): Promise<boolean> {
     return (await this.configuredClientId()) !== undefined;
   }
@@ -573,7 +569,6 @@ async function exchangeAuthorizationCode(
   return requestToken(
     fetchImpl,
     metadata,
-    config,
     new URLSearchParams({
       grant_type: "authorization_code",
       client_id: config.clientId,
@@ -596,7 +591,6 @@ async function refreshAccessToken(
   return requestToken(
     fetchImpl,
     metadata,
-    config,
     new URLSearchParams({
       grant_type: "refresh_token",
       client_id: config.clientId,
@@ -610,7 +604,6 @@ async function refreshAccessToken(
 async function requestToken(
   fetchImpl: typeof fetch,
   metadata: OAuthAuthorizationMetadata,
-  _config: SlackConfig,
   body: URLSearchParams,
   signal?: AbortSignal,
 ): Promise<TokenResponse> {

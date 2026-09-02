@@ -54,10 +54,6 @@ export const APPROVED_SLACK_TOOLS: Readonly<Record<SlackOperation, ToolContract>
   },
 };
 
-export const APPROVED_SLACK_TOOL_NAMES = new Set(
-  Object.values(APPROVED_SLACK_TOOLS).map((contract) => contract.name),
-);
-
 export function operationForSearch(input: SlackSearchInput): SlackOperation {
   return input.kind === "messages" ? "searchMessages" : "searchChannels";
 }
@@ -101,11 +97,7 @@ function boundedLimit(value: number | undefined, fallback: number, maximum: numb
   return Math.max(1, Math.min(maximum, value!));
 }
 
-export function verifyApprovedTools(
-  tools: SlackToolMetadata[],
-): Map<SlackOperation, SlackToolMetadata> {
-  const verified = new Map<SlackOperation, SlackToolMetadata>();
-
+export function verifyApprovedTools(tools: SlackToolMetadata[]): void {
   for (const [operation, contract] of Object.entries(APPROVED_SLACK_TOOLS) as Array<
     [SlackOperation, ToolContract]
   >) {
@@ -116,11 +108,8 @@ export function verifyApprovedTools(
     if (matches.length !== 1) {
       throw new Error(`Slack's approved ${operation} tool name is ambiguous.`);
     }
-    const tool = matches[0]!;
-    verifyToolContract(operation, contract, tool);
-    verified.set(operation, tool);
+    verifyToolContract(operation, contract, matches[0]!);
   }
-  return verified;
 }
 
 function verifyToolContract(
