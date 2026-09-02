@@ -157,15 +157,22 @@ function objectSection(
   return { value, valid: true };
 }
 
-function unknownKeys(
+/** Report unknown keys; an unknown key invalidates its section so a typo cannot disable a rule. */
+function knownKeysOnly(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
   prefix: string,
   diagnostics: string[],
-): void {
+): boolean {
+  let valid = true;
   for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) diagnostics.push(`Unknown ${prefix}.${key} setting; it is ignored.`);
+    if (allowed.has(key)) continue;
+    diagnostics.push(
+      `Unknown ${prefix}.${key} setting (expected one of: ${[...allowed].join(", ")}).`,
+    );
+    valid = false;
   }
+  return valid;
 }
 
 export function parseGuardrailsSettings(
@@ -196,17 +203,21 @@ export function parseGuardrailsSettings(
     };
   }
 
-  unknownKeys(
-    rawGuardrails,
-    new Set(["commands", "defaultBranch", "kubectl", "paths", "semanticReview"]),
-    "guardrails",
-    diagnostics,
-  );
+  if (
+    !knownKeysOnly(
+      rawGuardrails,
+      new Set(["commands", "defaultBranch", "kubectl", "paths", "semanticReview"]),
+      "guardrails",
+      diagnostics,
+    )
+  )
+    valid = false;
 
   const commands = objectSection(rawGuardrails, "commands", diagnostics);
   valid &&= commands.valid;
   if (commands.value) {
-    unknownKeys(commands.value, new Set(["blocked"]), "guardrails.commands", diagnostics);
+    if (!knownKeysOnly(commands.value, new Set(["blocked"]), "guardrails.commands", diagnostics))
+      valid = false;
     const blocked = stringArray(commands.value.blocked, "guardrails.commands.blocked", diagnostics);
     valid &&= blocked.valid;
     if (blocked.value) config.commands.blockedCommands = blocked.value;
@@ -215,7 +226,15 @@ export function parseGuardrailsSettings(
   const defaultBranch = objectSection(rawGuardrails, "defaultBranch", diagnostics);
   valid &&= defaultBranch.valid;
   if (defaultBranch.value) {
-    unknownKeys(defaultBranch.value, new Set(["allowed"]), "guardrails.defaultBranch", diagnostics);
+    if (
+      !knownKeysOnly(
+        defaultBranch.value,
+        new Set(["allowed"]),
+        "guardrails.defaultBranch",
+        diagnostics,
+      )
+    )
+      valid = false;
     const allowed = stringArray(
       defaultBranch.value.allowed,
       "guardrails.defaultBranch.allowed",
@@ -228,12 +247,15 @@ export function parseGuardrailsSettings(
   const kubectl = objectSection(rawGuardrails, "kubectl", diagnostics);
   valid &&= kubectl.valid;
   if (kubectl.value) {
-    unknownKeys(
-      kubectl.value,
-      new Set(["allowedCommands", "invocations"]),
-      "guardrails.kubectl",
-      diagnostics,
-    );
+    if (
+      !knownKeysOnly(
+        kubectl.value,
+        new Set(["allowedCommands", "invocations"]),
+        "guardrails.kubectl",
+        diagnostics,
+      )
+    )
+      valid = false;
     const allowedCommands = stringArray(
       kubectl.value.allowedCommands,
       "guardrails.kubectl.allowedCommands",
@@ -254,12 +276,15 @@ export function parseGuardrailsSettings(
             valid = false;
             continue;
           }
-          unknownKeys(
-            entry,
-            new Set(["command", "skipArguments"]),
-            `guardrails.kubectl.invocations[${index}]`,
-            diagnostics,
-          );
+          if (
+            !knownKeysOnly(
+              entry,
+              new Set(["command", "skipArguments"]),
+              `guardrails.kubectl.invocations[${index}]`,
+              diagnostics,
+            )
+          )
+            valid = false;
           const { command, skipArguments = 0 } = entry;
           if (
             typeof command !== "string" ||
@@ -283,7 +308,10 @@ export function parseGuardrailsSettings(
   const paths = objectSection(rawGuardrails, "paths", diagnostics);
   valid &&= paths.valid;
   if (paths.value) {
-    unknownKeys(paths.value, new Set(["blocked", "confirm"]), "guardrails.paths", diagnostics);
+    if (
+      !knownKeysOnly(paths.value, new Set(["blocked", "confirm"]), "guardrails.paths", diagnostics)
+    )
+      valid = false;
     const blocked = stringArray(paths.value.blocked, "guardrails.paths.blocked", diagnostics);
     const confirm = stringArray(paths.value.confirm, "guardrails.paths.confirm", diagnostics);
     valid &&= blocked.valid && confirm.valid;
@@ -294,12 +322,15 @@ export function parseGuardrailsSettings(
   const semanticReview = objectSection(rawGuardrails, "semanticReview", diagnostics);
   valid &&= semanticReview.valid;
   if (semanticReview.value) {
-    unknownKeys(
-      semanticReview.value,
-      new Set(["enabled", "mode", "model", "timeoutMs", "commands", "paths"]),
-      "guardrails.semanticReview",
-      diagnostics,
-    );
+    if (
+      !knownKeysOnly(
+        semanticReview.value,
+        new Set(["enabled", "mode", "model", "timeoutMs", "commands", "paths"]),
+        "guardrails.semanticReview",
+        diagnostics,
+      )
+    )
+      valid = false;
     const { enabled, mode, model, timeoutMs } = semanticReview.value;
     if (enabled !== undefined && typeof enabled !== "boolean") {
       diagnostics.push("guardrails.semanticReview.enabled must be a boolean.");
@@ -362,7 +393,13 @@ export async function loadGuardrailsConfig(): Promise<GuardrailsConfigLoadResult
     return parseGuardrailsSettings(JSON.parse(await readFile(source, "utf8")), source);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { config: copyDefaults(), diagnostics: [], valid: true, source };
+      // A missing file leaves nothing to enforce, so side-effecting tools must stay blocked.
+      return {
+        config: copyDefaults(),
+        diagnostics: [`${source}: the settings file is missing.`],
+        valid: false,
+        source,
+      };
     }
     return {
       config: copyDefaults(),

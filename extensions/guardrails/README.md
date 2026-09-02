@@ -24,7 +24,7 @@ Built-in policies:
 - **paths** — blocks or confirms writes matching configured path patterns;
 - **semantic review** — sends only configured agent actions through an independent classifier.
 
-Read-only tools remain available if the configuration cannot be loaded. Side-effecting tools fail closed until a valid configuration is available; a failed reload keeps the last known-good configuration.
+Read-only tools remain available if the configuration is missing or invalid. Side-effecting tools fail closed until a valid configuration is available: a missing settings file, a malformed value, or an unknown key anywhere under `guardrails` makes the configuration invalid, and the diagnostics are shown at session start. A failed reload keeps the last known-good configuration.
 
 ## Semantic review
 

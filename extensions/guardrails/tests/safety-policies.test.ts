@@ -137,9 +137,9 @@ describe("guardrails configuration", () => {
     assert.equal(invalid.diagnostics.length, 3);
   });
 
-  test("reports unknown keys without disabling valid policies", () => {
+  test("marks unknown keys invalid so a misspelled rule cannot silently disable itself", () => {
     const result = parseGuardrailsSettings({ guardrails: { futurePolicy: true } });
-    assert.equal(result.valid, true);
+    assert.equal(result.valid, false);
     assert.match(result.diagnostics[0] ?? "", /Unknown guardrails\.futurePolicy/);
   });
 });

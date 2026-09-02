@@ -297,6 +297,12 @@ export function registerGuardrails(
   pi.on("session_start", async (_event, ctx) => {
     await reloadConfig();
     state = restoreState(ctx);
+    if (configDiagnostics.length > 0 && ctx.hasUI) {
+      ctx.ui.notify(
+        `Guardrails configuration diagnostics:\n${configDiagnostics.join("\n")}`,
+        hasValidConfig ? "warning" : "error",
+      );
+    }
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
