@@ -101,6 +101,40 @@ test("refreshes git on a timer without overlapping reads", async (t) => {
   assert.equal(read.mock.calls.length, 3, "disposed pollers stop reading");
 });
 
+test("invalidates stale state and discards a read already in flight", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const reads: Array<ReturnType<typeof deferred<GitInfo | null>>> = [];
+  const poller = createGitStatusPoller({
+    cwd: () => "/repo",
+    read: () => {
+      const next = deferred<GitInfo | null>();
+      reads.push(next);
+      return next.promise;
+    },
+    intervalMs: 2000,
+    onChange() {},
+  });
+
+  reads[0]!.resolve(info(1));
+  await settle();
+  assert.deepEqual(poller.current(), info(1));
+
+  poller.refresh();
+  assert.equal(reads.length, 2);
+  poller.invalidate();
+  assert.equal(poller.current(), null);
+
+  reads[1]!.resolve(info(2));
+  await settle();
+  assert.equal(poller.current(), null, "the invalidated read is ignored");
+  assert.equal(reads.length, 3, "invalidation queues a fresh read");
+
+  reads[2]!.resolve(info(3));
+  await settle();
+  assert.deepEqual(poller.current(), info(3));
+  poller.dispose();
+});
+
 test("drops results that finish after disposal", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const pending = deferred<GitInfo | null>();

@@ -54,6 +54,8 @@ export interface GitStatusPoller {
   current(): GitInfo | null;
   /** Read again now, or right after the read in flight finishes. */
   refresh(): void;
+  /** Drop stale state and discard any read that started before this call. */
+  invalidate(): void;
   dispose(): void;
 }
 
@@ -214,6 +216,7 @@ export function createGitStatusPoller(options: {
   let inFlight = false;
   let queued = false;
   let disposed = false;
+  let generation = 0;
 
   const refresh = () => {
     if (disposed) return;
@@ -224,12 +227,13 @@ export function createGitStatusPoller(options: {
 
     inFlight = true;
     const directory = cwd();
+    const readGeneration = generation;
     void read(directory)
       .catch(() => null)
       .then((next) => {
         inFlight = false;
         if (disposed) return;
-        if (directory !== cwd()) {
+        if (readGeneration !== generation || directory !== cwd()) {
           queued = true;
         } else if (JSON.stringify(next) !== JSON.stringify(info)) {
           info = next;
@@ -248,6 +252,12 @@ export function createGitStatusPoller(options: {
   return {
     current: () => info,
     refresh,
+    invalidate() {
+      if (disposed) return;
+      generation++;
+      info = null;
+      refresh();
+    },
     dispose() {
       disposed = true;
       clearInterval(timer);
@@ -600,7 +610,7 @@ export default function (pi: ExtensionAPI) {
         },
       });
       const unsubscribe = footerData.onBranchChange(() => {
-        gitStatus.refresh();
+        gitStatus.invalidate();
         refreshPullRequest(true);
         tui.requestRender();
       });
