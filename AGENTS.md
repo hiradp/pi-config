@@ -20,7 +20,7 @@ pnpm format   # Format tracked extensions with Oxfmt
 - `extensions/` contains authored extensions and their tests.
 - `skills/` contains authored and vendored Pi skills.
 - `package.json`, `pnpm-lock.yaml`, and the Oxc/TypeScript files support extension development.
-- `.stow-local-ignore` keeps repository-only files out of `~/.pi/agent`.
+- `.stow-local-ignore` keeps repository-only files out of `~/.pi/agent`. `node_modules` and `package.json` must stay Stowed because the non-Pi dependencies (`@modelcontextprotocol/sdk`, `@napi-rs/keyring`, `diff`, `typebox`, `zod`) resolve through the linked `node_modules`.
 
 The root `.gitignore` pins authored files. `extensions/herdr-agent-state.ts` is installed and overwritten by herdr, so it remains ignored. Do not commit authentication, sessions, trust state, `node_modules`, Pi-installed packages, generated model data, or other runtime files.
 

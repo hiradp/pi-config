@@ -4,6 +4,11 @@
 \.gitignore
 \.gitmodules
 ^/\.github
+^/\.oxfmtrc\.json
 ^/AGENTS\.md
 ^/LICENSE.*
 ^/README.*
+^/extensions/tests
+^/pnpm-lock\.yaml
+^/pnpm-workspace\.yaml
+^/tsconfig\.json
