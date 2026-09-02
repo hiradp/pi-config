@@ -71,7 +71,7 @@ Configuration lives under `guardrails` in `~/.pi/agent/settings.json`:
       "enabled": true,
       "mode": "shadow",
       "timeoutMs": 15000,
-      "commands": ["gh", "git push", "terraform"],
+      "commands": ["claude", "gh", "git push", "helm", "pi", "terraform"],
       "paths": [".github/workflows", ".github/workflows/**"]
     },
     "kubectl": {
