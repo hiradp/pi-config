@@ -365,6 +365,14 @@ function getResultOutput(result: SingleResult): string {
   return getFinalOutput(result.messages) || "(no output)";
 }
 
+/**
+ * Fill every `{previous}` placeholder with the prior step's output. A replacer
+ * function keeps `$&`, `$'`, and similar sequences in that output literal.
+ */
+export function substitutePrevious(task: string, previous: string): string {
+  return task.replace(/\{previous\}/g, () => previous);
+}
+
 export function truncateOutput(
   output: string,
   maxBytes = MODEL_VISIBLE_OUTPUT_CAP,
@@ -1182,7 +1190,7 @@ export default function (pi: ExtensionAPI) {
 
         for (let i = 0; i < params.chain.length; i++) {
           const step = params.chain[i];
-          const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
+          const taskWithContext = substitutePrevious(step.task, previousOutput);
           const chainUpdate: OnUpdateCallback | undefined = onUpdate
             ? (partial) => {
                 const currentResult = partial.details?.results[0];
