@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { homedir } from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_GUARDRAILS_CONFIG } from "../config.ts";
 import { isRootHomeOrSystemPath, systemSafetyPolicy } from "../policies/system-safety.ts";
@@ -10,6 +11,15 @@ import type { GuardrailAction } from "../policy.ts";
 const pi = {} as ExtensionAPI;
 const home = homedir();
 const user = basename(home);
+let tempProject: string;
+
+before(async () => {
+  tempProject = await mkdtemp(join(tmpdir(), "pi-guardrail-temp-"));
+});
+
+after(async () => {
+  await rm(tempProject, { recursive: true, force: true });
+});
 
 async function outcome(action: GuardrailAction, cwd = process.cwd()): Promise<string | undefined> {
   const decision = await systemSafetyPolicy.check(action, {
@@ -45,11 +55,13 @@ describe("system safety deletion", () => {
       "rm -rf /var/*",
       "rm -rf /usr",
       "rm -rf /{usr,etc}",
+      "rm -rf /us*",
       "rm -rf -- /",
     ]) {
       assert.equal(await outcome(bash(command)), "block", command);
     }
     assert.equal(await outcome(bash("rm -rf *"), home), "block");
+    assert.equal(await outcome(bash("rm -rf .* *"), home), "block");
   });
 
   test("blocks find deletions rooted at home or system paths", async () => {
@@ -64,16 +76,42 @@ describe("system safety deletion", () => {
     }
   });
 
-  test("allows deletion inside project and home subtrees", async () => {
+  test("allows deletion inside working, temp, and home subtrees", async () => {
     for (const command of [
       "rm -rf ./build/*",
-      "rm -rf /tmp/build-*",
+      "rm -rf ./build",
       "rm -rf node_modules dist",
+      "rm -rf /tmp/build-*",
+      "rm -rf /private/tmp/build",
+      "rm -rf /var/tmp/build",
+      "rm -rf /private/var/tmp/build",
+      "rm -rf /var/folders/ab/cd/T/build",
+      `rm -rf ${join(tempProject, "build")}`,
       `rm -rf ${join(home, "Code/tmp-generated")}/*`,
+      "rm -rf ~/{build,dist}",
+      "rm -rf ~/Code/project-*",
       "find . -name '*.log' -exec rm {} +",
       `find ${join(home, "Code")} -name '*.log' -exec rm -rf {} +`,
     ]) {
-      assert.equal(await outcome(bash(command)), undefined, command);
+      assert.equal(await outcome(bash(command), tempProject), undefined, command);
+    }
+  });
+
+  test("protects temp roots but not their contents", async () => {
+    for (const command of [
+      "rm -rf /tmp",
+      "rm -rf /private/tmp",
+      "rm -rf /var/tmp",
+      "rm -rf /private/var/tmp",
+      "rm -rf /var/folders",
+      "rm -rf /private/var/folders",
+      "rm -rf /private/var",
+      "rm -rf /private",
+      "rm -rf /var",
+      "rm -rf /tmp/*",
+      `rm -rf ${tmpdir()}`,
+    ]) {
+      assert.equal(await outcome(bash(command), tempProject), "block", command);
     }
   });
 
@@ -84,7 +122,25 @@ describe("system safety deletion", () => {
     assert.equal(isRootHomeOrSystemPath("/home/other", syntheticHome), true);
     assert.equal(isRootHomeOrSystemPath("/Library/Caches", syntheticHome), true);
     assert.equal(isRootHomeOrSystemPath("/opt/homebrew", syntheticHome), true);
+    assert.equal(isRootHomeOrSystemPath("/var/lib", syntheticHome), true);
     assert.equal(isRootHomeOrSystemPath(`${syntheticHome}/Library/Caches`, syntheticHome), false);
+  });
+
+  test("protects temp roots exactly and exempts their subtrees", () => {
+    const syntheticHome = "/Users/person";
+    for (const root of ["/tmp", "/private/tmp", "/var/tmp", "/var/folders", "/private/var"]) {
+      assert.equal(isRootHomeOrSystemPath(root, syntheticHome), true, root);
+    }
+    for (const path of [
+      "/tmp/build",
+      "/private/tmp/proj/node_modules",
+      "/var/tmp/x",
+      "/private/var/tmp/x",
+      "/var/folders/ab/cd/T/build",
+      "/private/var/folders/ab/cd/T/build",
+    ]) {
+      assert.equal(isRootHomeOrSystemPath(path, syntheticHome), false, path);
+    }
   });
 });
 

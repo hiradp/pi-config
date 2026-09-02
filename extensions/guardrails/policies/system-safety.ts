@@ -1,4 +1,4 @@
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { parseShellCommand, shellSegmentInvocation, type ShellSegment } from "../command-parser.ts";
 import {
@@ -76,36 +76,74 @@ const SYSTEM_ROOTS = [
   "/usr",
   "/var",
 ];
+/** Temp trees protect only their root; everything below them is disposable by design. */
+const TEMP_ROOTS = [
+  ...new Set([
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders",
+    resolve(tmpdir()),
+    canonical(tmpdir()),
+  ]),
+];
 
+/** Root, a home directory, or a system tree; system trees are protected as whole subtrees. */
 export function isRootHomeOrSystemPath(path: string, userHome = home): boolean {
   if (path.startsWith(`${userHome}/`)) return false;
-  return (
-    path === "/" ||
-    path === userHome ||
-    SYSTEM_ROOTS.some((root) => path === root || path.startsWith(`${root}/`))
-  );
+  if (path === "/" || path === userHome || TEMP_ROOTS.includes(path)) return true;
+  if (TEMP_ROOTS.some((root) => path.startsWith(`${root}/`))) return false;
+  return SYSTEM_ROOTS.some((root) => path === root || path.startsWith(`${root}/`));
 }
 
 function recursiveRmArgument(argument: string): boolean {
   return argument === "--recursive" || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(argument);
 }
 
-const GLOB_SEGMENT = /[*?[]|\{[^}]*(?:,|\.\.)[^}]*\}/;
+const GLOB_CHARACTERS = /[*?[]/;
+const BRACE_EXPANSION = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
+/** Segments that match every entry of their directory, so the directory itself is the target. */
+const EVERYTHING = new Set(["*", "**", ".*"]);
 
-/** Resolve a deletion argument, expanding `~user` and cutting at the first glob segment. */
-function deletionTarget(cwd: string, argument: string): string | undefined {
+/** Expand one comma brace group; anything more elaborate is handled as a glob segment. */
+function braceAlternatives(value: string): string[] {
+  const match = value.match(/^([^{}]*)\{([^{}]*,[^{}]*)\}([^{}]*)$/);
+  if (!match) return [value];
+  const [, prefix, body, suffix] = match;
+  return body.split(",").map((alternative) => `${prefix}${alternative}${suffix}`);
+}
+
+/**
+ * Resolve the paths a deletion argument can reach, expanding `~user` and braces. A segment
+ * that matches everything in a directory (or any glob directly under `/`) targets the
+ * directory itself; a partial glob such as `build-*` stays a child of its directory.
+ */
+function deletionTargets(cwd: string, argument: string): string[] {
   let value = argument;
   const tildeUser = value.match(/^~([^/]+)(\/.*)?$/);
   if (tildeUser) {
     const [, user, rest = ""] = tildeUser;
     value = (user === basename(home) ? home : resolve(dirname(home), user)) + rest;
   }
-  const path = resolveInputPath(cwd, value);
-  if (!path) return;
-  const segments = path.split("/");
-  const glob = segments.findIndex((segment) => GLOB_SEGMENT.test(segment));
-  if (glob === -1) return path;
-  return segments.slice(0, glob).join("/") || "/";
+  const targets: string[] = [];
+  for (const alternative of braceAlternatives(value)) {
+    const path = resolveInputPath(cwd, alternative);
+    if (!path) continue;
+    const segments = path.split("/");
+    let target = path;
+    for (let index = 1; index < segments.length; index++) {
+      const segment = segments[index];
+      const brace = BRACE_EXPANSION.test(segment);
+      if (!brace && !GLOB_CHARACTERS.test(segment)) continue;
+      const everything = brace || EVERYTHING.has(segment) || index === 1;
+      target = segments.slice(0, everything ? index : index + 1).join("/") || "/";
+      break;
+    }
+    targets.push(target);
+  }
+  return targets;
 }
 
 const FIND_LEADING_FLAGS = /^-[HLPEXdsx]+$/;
@@ -253,16 +291,16 @@ function segmentSafetyReason(segment: ShellSegment, cwd: string): string | undef
 
   if (name === "rm" && args.some(recursiveRmArgument)) {
     for (const argument of args.filter((value) => !value.startsWith("-"))) {
-      const path = deletionTarget(cwd, argument);
-      if (path && isRootHomeOrSystemPath(path)) {
+      if (deletionTargets(cwd, argument).some((path) => isRootHomeOrSystemPath(path))) {
         return "irreversible deletion of home, root, or system paths is hard-denied";
       }
     }
   }
   if (name === "find" && findDeletes(args)) {
     for (const start of findStartingPoints(args)) {
-      const path = deletionTarget(cwd, start);
-      if (path && isRootHomeOrSystemPath(path)) return "system-wide delete is hard-denied";
+      if (deletionTargets(cwd, start).some((path) => isRootHomeOrSystemPath(path))) {
+        return "system-wide delete is hard-denied";
+      }
     }
   }
   if (["chmod", "chown"].includes(name)) {
