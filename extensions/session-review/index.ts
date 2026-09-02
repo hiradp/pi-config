@@ -1,5 +1,6 @@
 import { BorderedLoader, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { analyzeSessions } from "./analysis.ts";
+import { errorMessage } from "./format.ts";
 import { writeHtmlReport } from "./html.ts";
 import {
   loadClassificationConfig,
@@ -9,10 +10,6 @@ import {
 } from "./sessions.ts";
 import type { PreparedSession, SessionReviewReport } from "./types.ts";
 import { SessionReviewView, sortSessionsByCost } from "./view.ts";
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 async function openHtmlReport(pi: ExtensionAPI, path: string): Promise<boolean> {
   try {
@@ -74,7 +71,12 @@ export default function (pi: ExtensionAPI) {
       }
 
       type ScanResult =
-        | { sessions: PreparedSession[]; cutoff: number; skippedFiles: number }
+        | {
+            sessions: PreparedSession[];
+            cutoff: number;
+            skippedFiles: number;
+            skippedLines: number;
+          }
         | { error: unknown }
         | null;
       const now = new Date();
@@ -90,10 +92,15 @@ export default function (pi: ExtensionAPI) {
         };
         loader.onAbort = () => finish(null);
 
-        void loadSessionCorpus(loader.signal)
-          .then(async ({ sessions: corpus, skippedFiles }) => {
-            const prepared = await prepareRecentSessions(corpus, days, now, config, loader.signal);
-            finish({ ...prepared, skippedFiles });
+        void loadSessionCorpus({ days, now, signal: loader.signal })
+          .then(async (corpus) => {
+            const sessions = await prepareRecentSessions(corpus, config, loader.signal);
+            finish({
+              sessions,
+              cutoff: corpus.cutoff,
+              skippedFiles: corpus.skippedFiles,
+              skippedLines: corpus.skippedLines,
+            });
           })
           .catch((error) => finish({ error }));
         return loader;
@@ -182,6 +189,7 @@ export default function (pi: ExtensionAPI) {
         generationCost: analysis.generationCost,
         ...(analysis.warning ? { analysisWarning: analysis.warning } : {}),
         skippedFiles: scan.skippedFiles,
+        skippedLines: scan.skippedLines,
       };
 
       try {

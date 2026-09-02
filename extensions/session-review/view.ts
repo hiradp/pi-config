@@ -7,6 +7,7 @@ import {
   type Component,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { dateRange, formatReviewCost, sessionDate, successRate, titleCase } from "./format.ts";
 import type {
   CategoryStats,
   ReviewedSession,
@@ -15,15 +16,6 @@ import type {
 } from "./types.ts";
 
 const CATEGORIES: SessionCategory[] = ["work", "personal", "unclear"];
-
-export function formatReviewCost(cost: number): string {
-  const digits = cost >= 1 ? 2 : cost >= 0.01 ? 3 : 4;
-  return `$${cost.toFixed(digits)}`;
-}
-
-function titleCase(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
 
 export function sanitizeDisplayText(value: string): string {
   let result = "";
@@ -94,29 +86,6 @@ export function categoryStats(sessions: readonly ReviewedSession[]): CategorySta
       unclear: matching.filter((session) => session.outcome === "unclear").length,
     };
   });
-}
-
-function successRate(stats: CategoryStats): string {
-  const decided = stats.success + stats.failure;
-  return decided === 0 ? "— success" : `${Math.round((stats.success / decided) * 100)}% success`;
-}
-
-function localRange(report: SessionReviewReport): string {
-  const format = new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  return `${format.format(new Date(report.cutoff))} – ${format.format(new Date(report.generatedAt))}`;
-}
-
-function sessionDate(timestamp: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(timestamp));
 }
 
 function plainWrapped(value: string, width: number): string[] {
@@ -219,13 +188,13 @@ export class SessionReviewView implements Component {
       this.theme.fg("accent", this.theme.bold(" Session review")),
       this.theme.fg(
         "dim",
-        ` ${localRange(this.report)} · trailing ${this.report.days} days · local time`,
+        ` ${dateRange(this.report)} · trailing ${this.report.days} days · local time`,
       ),
       ` ${this.theme.fg("text", `${this.report.sessions.length} sessions`)}${this.theme.fg("dim", " · ")}${this.theme.fg("accent", `${formatReviewCost(totalCost)} recorded cost`)}`,
       ` ${this.theme.fg("success", `${successful} successful`)}${this.theme.fg("dim", " · ")}${this.theme.fg("error", `${failed} failed`)}${this.theme.fg("dim", " · ")}${this.theme.fg("warning", `${unclear} unclear`)}`,
       ...stats.map(
         (item) =>
-          ` ${this.theme.fg(item.category === "unclear" ? "muted" : "accent", titleCase(item.category))}${this.theme.fg("dim", `: ${item.count} · ${formatReviewCost(item.cost)} · ${successRate(item)}`)}`,
+          ` ${this.theme.fg(item.category === "unclear" ? "muted" : "accent", titleCase(item.category))}${this.theme.fg("dim", `: ${item.count} · ${formatReviewCost(item.cost)} · ${successRate(item.success, item.failure)}`)}`,
       ),
       this.theme.fg("border", "─".repeat(Math.max(1, width))),
     ];
@@ -235,6 +204,9 @@ export class SessionReviewView implements Component {
       this.report.analysisWarning,
       this.report.skippedFiles > 0
         ? `${this.report.skippedFiles} unreadable session files skipped`
+        : undefined,
+      this.report.skippedLines > 0
+        ? `${this.report.skippedLines} unreadable session lines skipped`
         : undefined,
       this.report.generationCost > 0
         ? `Report generation cost: ${formatReviewCost(this.report.generationCost)}`
