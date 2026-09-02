@@ -160,7 +160,7 @@ function invalidateGitCache(): void {
   gitCache = null;
 }
 
-function classifyPullRequest(data: Record<string, unknown>): PullRequestStatus {
+export function classifyPullRequest(data: Record<string, unknown>): PullRequestStatus {
   if (data.state === "MERGED" || typeof data.mergedAt === "string") return "merged";
   if (data.state !== "OPEN") return "other";
 
@@ -210,6 +210,11 @@ function classifyPullRequest(data: Record<string, unknown>): PullRequestStatus {
   }
 
   return data.isDraft !== true && data.mergeStateStatus === "CLEAN" ? "ready" : "other";
+}
+
+/** Pi reports a detached HEAD as the literal branch "detached", which `gh pr view` cannot resolve. */
+export function canLookupPullRequest(branch: string | null): branch is string {
+  return Boolean(branch) && branch !== "detached";
 }
 
 async function loadPullRequest(
@@ -458,7 +463,7 @@ export default function (pi: ExtensionAPI) {
       const refreshPullRequest = (force = false) => {
         const branch = footerData.getGitBranch();
         const now = Date.now();
-        if (!branch) {
+        if (!canLookupPullRequest(branch)) {
           pullRequest = null;
           pullRequestBranch = null;
           pullRequestCheckedAt = now;
