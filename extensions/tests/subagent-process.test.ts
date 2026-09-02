@@ -25,7 +25,8 @@ test("kills a child that exceeds its wall-clock limit and reports the timeout", 
 
   assert.equal(outcome.timedOut, true);
   assert.equal(outcome.aborted, false);
-  assert.equal(outcome.signal, "SIGKILL");
+  // SIGTERM ends the child when it fires before the handler is installed; SIGKILL otherwise.
+  assert.ok(outcome.signal === "SIGTERM" || outcome.signal === "SIGKILL");
 
   const status = classifyChildExit(outcome.code, outcome.signal, false, 2_700_000);
   assert.equal(status.exitCode, 1);

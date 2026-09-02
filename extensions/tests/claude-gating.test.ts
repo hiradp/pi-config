@@ -12,5 +12,6 @@ test("kills a Claude child that exceeds its wall-clock limit", async () => {
   assert.equal(result.timedOut, true);
   assert.equal(result.killed, true);
   assert.equal(result.aborted, false);
-  assert.equal(result.signal, "SIGKILL");
+  // SIGTERM ends the child when it fires before the handler is installed; SIGKILL otherwise.
+  assert.ok(result.signal === "SIGTERM" || result.signal === "SIGKILL");
 });
