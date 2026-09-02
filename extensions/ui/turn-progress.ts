@@ -10,11 +10,10 @@
 
 import { performance } from "node:perf_hooks";
 import type { StopReason } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { SHIMMER_INTERVAL_MS, shimmerText } from "./shimmer.ts";
 
-const SHIMMER_INTERVAL_MS = 100;
-const SHIMMER_WIDTH = 3;
 const WORKING_PHRASE_INTERVAL_MS = 20_000;
 const TURN_PROGRESS_ENTRY = "working-message";
 
@@ -138,21 +137,6 @@ export function formatWorkingStats(
   return `(${stats.join(" · ")})`;
 }
 
-function shimmer(text: string, theme: Theme, tick: number): string {
-  const chars = [...text];
-  const center = (tick % (chars.length + SHIMMER_WIDTH * 2)) - SHIMMER_WIDTH;
-
-  return chars
-    .map((char, index) => {
-      const distance = Math.abs(index - center);
-      if (distance < 0.75) return theme.fg("text", char);
-      if (distance < 1.75) return theme.fg("accent", char);
-      if (distance < 2.75) return theme.fg("muted", char);
-      return theme.fg("dim", char);
-    })
-    .join("");
-}
-
 export default function (pi: ExtensionAPI) {
   let requestStartedAt: number | null = null;
   let nextPhraseChangeAt: number | null = null;
@@ -212,7 +196,7 @@ export default function (pi: ExtensionAPI) {
         shimmerTick = 0;
       }
 
-      const message = shimmer(`${workingPhrase}…`, ctx.ui.theme, shimmerTick++);
+      const message = shimmerText(`${workingPhrase}…`, ctx.ui.theme, shimmerTick++);
       const stats = formatWorkingStats(
         now - requestStartedAt,
         completedOutputTokens + streamingOutputTokens,

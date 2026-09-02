@@ -5,9 +5,9 @@
  * giving it an isolated context window.
  *
  * Supports three modes:
- *   - Single: { agent: "name", task: "...", model?: "provider/model" }
- *   - Parallel: { tasks: [{ agent: "name", task: "...", model?: "provider/model" }, ...] }
- *   - Chain: { chain: [{ agent: "name", task: "... {previous} ...", model?: "provider/model" }, ...] }
+ *   - Single: { agent: "name", task: "...", label?: "...", model?: "provider/model" }
+ *   - Parallel: { tasks: [{ agent: "name", task: "...", label?: "...", model?: "provider/model" }, ...] }
+ *   - Chain: { chain: [{ agent: "name", task: "... {previous} ...", label?: "...", model?: "provider/model" }, ...] }
  *
  * Uses JSON mode to capture structured output from subagents.
  */
@@ -39,6 +39,7 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { SHIMMER_INTERVAL_MS, shimmerText } from "../ui/shimmer.ts";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -233,6 +234,7 @@ interface SingleResult {
   agent: string;
   agentSource: "user" | "project" | "unknown";
   task: string;
+  label?: string;
   exitCode: number;
   messages: Message[];
   stderr: string;
@@ -544,6 +546,11 @@ function latestActivity(result: SingleResult, status: SubagentStatus, theme: The
   return theme.fg("muted", "writing response…");
 }
 
+function responsibilityLabel(result: SingleResult): string {
+  const task = result.task.replace(/\{previous\}/g, "[previous output]");
+  return singleLine(result.label || task) || singleLine(result.agent);
+}
+
 function addFailureDiagnostic(container: Container, result: SingleResult, theme: Theme): void {
   if (!isFailedResult(result)) return;
   const diagnostic = result.errorMessage || result.stderr || result.stopReason;
@@ -578,12 +585,7 @@ class SubagentDashboard implements Component {
     const queued = statuses.filter((status) => status === "queued").length;
     const finished = completed + failed;
     const total = statuses.length;
-    const spinner = ["·", "•", "●", "•"][Math.floor(now / 250) % 4];
-    const icon = this.active
-      ? this.theme.fg("accent", spinner)
-      : failed > 0
-        ? this.theme.fg("error", "×")
-        : this.theme.fg("success", "✓");
+    const icon = failed > 0 ? this.theme.fg("error", "×") : this.theme.fg("success", "✓");
 
     const summary: string[] = [];
     if (this.active) {
@@ -596,35 +598,44 @@ class SubagentDashboard implements Component {
       if (queued > 0) summary.push(`${queued} not run`);
     }
 
+    const title = this.details.mode === "single" ? "Subagent" : "Subagents";
+    const heading = this.theme.fg("toolTitle", this.theme.bold(title));
     const lines = [
-      truncateToWidth(`${icon} ${this.theme.fg("accent", summary.join(" · "))}`, width, "…"),
+      truncateToWidth(
+        `${this.active ? heading : `${icon} ${heading}`} ${this.theme.fg("accent", summary.join(" · "))}`,
+        width,
+        "…",
+      ),
     ];
-    const nameWidth = Math.min(
-      18,
-      Math.max(8, ...this.details.results.map((result) => visibleWidth(singleLine(result.agent)))),
-    );
+    const shimmerTick = Math.floor(now / SHIMMER_INTERVAL_MS);
 
     for (let index = 0; index < this.details.results.length; index++) {
       const result = this.details.results[index];
       const status = statuses[index];
-      const rowIcon =
+      const statusIcon =
+        status === "completed"
+          ? this.theme.fg("success", "✓")
+          : status === "failed"
+            ? this.theme.fg("error", "×")
+            : status === "queued"
+              ? this.theme.fg("dim", "–")
+              : " ";
+      const rawLabel = `${responsibilityLabel(result)}${status === "running" ? "…" : ""}`;
+      const fittedLabel = truncateToWidth(rawLabel, 60, "…");
+      const label =
         status === "running"
-          ? this.theme.fg("accent", spinner)
-          : status === "completed"
-            ? this.theme.fg("success", "✓")
-            : status === "failed"
-              ? this.theme.fg("error", "×")
-              : this.theme.fg("dim", this.active ? "○" : "–");
-      const agentName = singleLine(result.agent);
-      const name = this.theme.fg("toolTitle", this.theme.bold(agentName));
-      const namePadding = " ".repeat(Math.max(1, nameWidth - visibleWidth(agentName) + 1));
-      const left = `  ${rowIcon} ${name}${namePadding}${latestActivity(result, status, this.theme)}`;
-      const stats = this.theme.fg("dim", resultStats(result, status, now));
-      lines.push(fitColumns(left, stats, width));
+          ? shimmerText(fittedLabel, this.theme, shimmerTick)
+          : this.theme.fg(status === "queued" ? "dim" : "toolTitle", fittedLabel);
+      const left = `  ${statusIcon} ${label}`;
+      const statsText = [singleLine(result.agent), resultStats(result, status, now)]
+        .filter(Boolean)
+        .join(" · ");
+      lines.push(fitColumns(left, this.theme.fg("dim", statsText), width));
 
-      if (status === "running" || status === "queued") {
-        const task = singleLine(result.task.replace(/\{previous\}/g, "[previous output]"));
-        lines.push(truncateToWidth(`    ${this.theme.fg("dim", task)}`, width, "…"));
+      if (status === "running") {
+        lines.push(
+          truncateToWidth(`    ${latestActivity(result, status, this.theme)}`, width, "…"),
+        );
       }
     }
 
@@ -637,54 +648,6 @@ class SubagentDashboard implements Component {
   }
 
   invalidate(): void {}
-}
-
-interface TimerScheduler {
-  set(callback: () => void, milliseconds: number): ReturnType<typeof setInterval>;
-  clear(timer: ReturnType<typeof setInterval>): void;
-}
-
-const systemTimerScheduler: TimerScheduler = {
-  set: (callback, milliseconds) => setInterval(callback, milliseconds),
-  clear: (timer) => clearInterval(timer),
-};
-
-export class DashboardTimerRegistry {
-  private readonly timers = new Map<string, ReturnType<typeof setInterval>>();
-  private readonly scheduler: TimerScheduler;
-
-  constructor(scheduler: TimerScheduler = systemTimerScheduler) {
-    this.scheduler = scheduler;
-  }
-
-  update(toolCallId: string, active: boolean, invalidate: () => void): void {
-    if (!active) {
-      this.clear(toolCallId);
-      return;
-    }
-    if (!this.timers.has(toolCallId)) {
-      this.timers.set(
-        toolCallId,
-        this.scheduler.set(() => invalidate(), 250),
-      );
-    }
-  }
-
-  clear(toolCallId: string): void {
-    const timer = this.timers.get(toolCallId);
-    if (timer === undefined) return;
-    this.scheduler.clear(timer);
-    this.timers.delete(toolCallId);
-  }
-
-  clearAll(): void {
-    for (const timer of this.timers.values()) this.scheduler.clear(timer);
-    this.timers.clear();
-  }
-
-  get size(): number {
-    return this.timers.size;
-  }
 }
 
 async function mapWithConcurrencyLimit<TIn, TOut>(
@@ -773,6 +736,7 @@ async function runSingleAgent(
   agents: AgentConfig[],
   agentName: string,
   task: string,
+  label: string | undefined,
   invocationModel: string | undefined,
   cwd: string | undefined,
   step: number | undefined,
@@ -789,6 +753,7 @@ async function runSingleAgent(
       agent: agentName,
       agentSource: "unknown",
       task,
+      label,
       exitCode: 1,
       messages: [],
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
@@ -813,6 +778,7 @@ async function runSingleAgent(
     agent: agentName,
     agentSource: agent.source,
     task,
+    label,
     exitCode: -1,
     messages: [],
     stderr: "",
@@ -979,9 +945,14 @@ const ModelOverride = Type.Optional(
   }),
 );
 
+const DisplayLabel = Type.Optional(
+  Type.String({ description: "Short display label describing the subagent's responsibility" }),
+);
+
 const TaskItem = Type.Object({
   agent: Type.String({ description: "Name of the agent to invoke" }),
   task: Type.String({ description: "Task to delegate to the agent" }),
+  label: DisplayLabel,
   model: ModelOverride,
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
@@ -989,6 +960,7 @@ const TaskItem = Type.Object({
 const ChainItem = Type.Object({
   agent: Type.String({ description: "Name of the agent to invoke" }),
   task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+  label: DisplayLabel,
   model: ModelOverride,
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
@@ -1004,6 +976,7 @@ const SubagentParams = Type.Object({
     Type.String({ description: "Name of the agent to invoke (for single mode)" }),
   ),
   task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
+  label: DisplayLabel,
   model: Type.Optional(
     Type.String({
       description:
@@ -1032,13 +1005,7 @@ const SubagentParams = Type.Object({
   ),
 });
 
-export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = systemTimerScheduler) {
-  const dashboardTimers = new DashboardTimerRegistry(timerScheduler);
-
-  pi.on("tool_execution_end", (event) => {
-    if (event.toolName === "subagent") dashboardTimers.clear(event.toolCallId);
-  });
-  pi.on("session_shutdown", () => dashboardTimers.clearAll());
+export default function (pi: ExtensionAPI) {
   pi.on("tool_result", (event) => {
     if (event.toolName !== "subagent" || !hasFailedSubagentResult(event.details)) return;
     return { isError: true };
@@ -1050,6 +1017,7 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
     description: [
       "Delegate tasks to specialized subagents with isolated context.",
       "Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
+      "Each subagent may include a short display label describing its responsibility.",
       "Single, parallel, and chain invocations may override the agent model.",
       `Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
       `To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
@@ -1127,6 +1095,7 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
           agent: step.agent,
           agentSource: "unknown",
           task: step.task,
+          label: step.label,
           exitCode: -1,
           messages: [],
           stderr: "",
@@ -1147,7 +1116,11 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
             ? (partial) => {
                 const currentResult = partial.details?.results[0];
                 if (currentResult) {
-                  allResults[i] = { ...currentResult, task: step.task };
+                  allResults[i] = {
+                    ...currentResult,
+                    task: step.task,
+                    label: step.label,
+                  };
                   onUpdate({
                     content: partial.content,
                     details: makeDetails("chain")([...allResults]),
@@ -1162,6 +1135,7 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
             agents,
             step.agent,
             taskWithContext,
+            step.label,
             step.model,
             step.cwd,
             i + 1,
@@ -1170,6 +1144,7 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
             makeDetails("chain"),
           );
           result.task = step.task;
+          result.label = step.label;
           allResults[i] = result;
 
           if (isFailedResult(result)) {
@@ -1225,6 +1200,7 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
             agent: task.agent,
             agentSource: "unknown",
             task: task.task,
+            label: task.label,
             exitCode: -1,
             messages: [],
             stderr: "",
@@ -1256,6 +1232,7 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
               agents,
               t.agent,
               t.task,
+              t.label,
               t.model,
               t.cwd,
               undefined,
@@ -1302,6 +1279,7 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
           agents,
           params.agent,
           params.task,
+          params.label,
           params.model,
           params.cwd,
           undefined,
@@ -1361,10 +1339,11 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
         return new Text(text, 0, 0);
       }
       const agentName = args.agent || "...";
-      const preview = args.task
-        ? args.task.length > 60
-          ? `${args.task.slice(0, 60)}...`
-          : args.task
+      const responsibility = args.label || args.task;
+      const preview = responsibility
+        ? responsibility.length > 60
+          ? `${responsibility.slice(0, 60)}...`
+          : responsibility
         : "...";
       let text =
         theme.fg("toolTitle", theme.bold("subagent ")) +
@@ -1377,7 +1356,6 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
     renderResult(result, { expanded, isPartial }, theme, context) {
       const details = result.details as SubagentDetails | undefined;
       if (!details || details.results.length === 0) {
-        dashboardTimers.clear(context.toolCallId);
         const text = result.content[0];
         return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
       }
@@ -1388,8 +1366,6 @@ export default function (pi: ExtensionAPI, timerScheduler: TimerScheduler = syst
           const status = resultStatus(child);
           return status === "queued" || status === "running";
         });
-      dashboardTimers.update(context.toolCallId, active, context.invalidate);
-
       if (!expanded || active) {
         const dashboard =
           context.lastComponent instanceof SubagentDashboard

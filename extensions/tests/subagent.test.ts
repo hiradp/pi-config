@@ -7,7 +7,6 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import registerSubagent, {
   classifyChildExit,
   combineUsage,
-  DashboardTimerRegistry,
   formatElapsed,
   formatParallelProgress,
   hasFailedSubagentResult,
@@ -55,7 +54,7 @@ test("resolves invocation, agent, and parent models in precedence order", () => 
   );
 });
 
-test("exposes model overrides in every subagent mode", () => {
+test("exposes model overrides and display labels in every subagent mode", () => {
   type Schema = { description?: string; properties: Record<string, unknown> };
   let parameters: Schema | undefined;
 
@@ -69,11 +68,14 @@ test("exposes model overrides in every subagent mode", () => {
   assert.ok(parameters);
   const singleModel = parameters.properties.model as Schema;
   assert.match(singleModel.description ?? "", /single mode/);
+  assert.ok(parameters.properties.label);
 
   const taskSchema = parameters.properties.tasks as { items: Schema };
   const chainSchema = parameters.properties.chain as { items: Schema };
   assert.ok(taskSchema.items.properties.model);
+  assert.ok(taskSchema.items.properties.label);
   assert.ok(chainSchema.items.properties.model);
+  assert.ok(chainSchema.items.properties.label);
 });
 
 test("aggregates complete nested model usage", () => {
@@ -221,33 +223,6 @@ test("removes terminal sequences and C0/C1 controls from dashboard text", () => 
     }),
     false,
   );
-});
-
-test("dashboard timer registry reuses and tears down timers", () => {
-  const active = new Map<number, () => void>();
-  let nextTimer = 1;
-  const registry = new DashboardTimerRegistry({
-    set(callback) {
-      const timer = nextTimer++;
-      active.set(timer, callback);
-      return timer as unknown as ReturnType<typeof setInterval>;
-    },
-    clear(timer) {
-      active.delete(timer as unknown as number);
-    },
-  });
-
-  registry.update("first", true, () => {});
-  registry.update("first", true, () => {});
-  registry.update("second", true, () => {});
-  assert.equal(registry.size, 2);
-  assert.equal(active.size, 2);
-
-  registry.clear("first");
-  assert.equal(registry.size, 1);
-  registry.clearAll();
-  assert.equal(registry.size, 0);
-  assert.equal(active.size, 0);
 });
 
 test(
@@ -461,29 +436,12 @@ test("renders running subagents as a stable dashboard", () => {
   ) => { render(width: number): string[] };
 
   let renderResult: Renderer | undefined;
-  const handlers = new Map<string, (event: any) => void>();
-  const activeTimers = new Set<ReturnType<typeof setInterval>>();
-  let nextTimer = 1;
-  registerSubagent(
-    {
-      on(event: string, handler: (event: any) => void) {
-        handlers.set(event, handler);
-      },
-      registerTool(definition: { renderResult?: Renderer }) {
-        renderResult = definition.renderResult;
-      },
-    } as unknown as ExtensionAPI,
-    {
-      set() {
-        const timer = nextTimer++ as unknown as ReturnType<typeof setInterval>;
-        activeTimers.add(timer);
-        return timer;
-      },
-      clear(timer) {
-        activeTimers.delete(timer);
-      },
+  registerSubagent({
+    on() {},
+    registerTool(definition: { renderResult?: Renderer }) {
+      renderResult = definition.renderResult;
     },
-  );
+  } as unknown as ExtensionAPI);
   assert.ok(renderResult);
 
   const usage = {
@@ -506,7 +464,8 @@ test("renders running subagents as a stable dashboard", () => {
       {
         agent: "code-reviewer",
         agentSource: "user",
-        task: "Review correctness and completeness",
+        task: "Review the current code for correctness and completeness",
+        label: "Checking correctness",
         exitCode: -1,
         messages: [
           {
@@ -557,57 +516,31 @@ test("renders running subagents as a stable dashboard", () => {
     toolCallId: "subagent-call",
   };
 
-  try {
-    const component = renderResult(
-      { content: [{ type: "text", text: "running" }], details: runningDetails },
-      { expanded: false, isPartial: true },
-      theme,
-      context,
-    );
-    const lines = component.render(100);
-    const dashboard = lines.join("\n");
+  const component = renderResult(
+    { content: [{ type: "text", text: "running" }], details: runningDetails },
+    { expanded: false, isPartial: true },
+    theme,
+    context,
+  );
+  const lines = component.render(100);
+  const dashboard = lines.join("\n");
 
-    assert.equal(activeTimers.size, 1);
-    assert.match(dashboard, /0\/2 finished · 1 running · 1 queued/);
-    assert.match(dashboard, /code-reviewer\s+\$ echo first echo second/);
-    assert.equal(dashboard.includes("\u001b[31m"), false);
-    assert.ok(lines.every((line) => !line.includes("\n") && !line.includes("\r")));
-    assert.match(dashboard, /Review correctness and completeness/);
-    assert.match(dashboard, /2 turns · ↓1\.2k · \$0\.0123 · gpt-5\.6-sol/);
-    assert.match(dashboard, /plan-reviewer\s+waiting.*queued · gpt-5\.6-sol/);
-    assert.ok(lines.every((line) => visibleWidth(line) <= 100));
-    assert.ok(component.render(32).every((line) => visibleWidth(line) <= 32));
+  assert.match(dashboard, /0\/2 finished · 1 running · 1 queued/);
+  assert.match(dashboard, /Checking correctness…/);
+  assert.match(dashboard, /code-reviewer · \d+s · 2 turns · ↓1\.2k · \$0\.0123 · gpt-5\.6-sol/);
+  assert.match(dashboard, /\$ echo first echo second/);
+  assert.equal(dashboard.includes("\u001b[31m"), false);
+  assert.ok(lines.every((line) => !line.includes("\n") && !line.includes("\r")));
+  assert.match(dashboard, /Review the implementation plan/);
+  assert.match(dashboard, /plan-reviewer · queued · gpt-5\.6-sol/);
+  assert.ok(lines.every((line) => visibleWidth(line) <= 100));
+  assert.ok(component.render(32).every((line) => visibleWidth(line) <= 32));
 
-    renderResult(
-      { content: [{ type: "text", text: "running" }], details: runningDetails },
-      { expanded: false, isPartial: true },
-      theme,
-      context,
-    );
-    assert.equal(activeTimers.size, 1);
-    handlers.get("tool_execution_end")?.({
-      toolName: "subagent",
-      toolCallId: "subagent-call",
-    });
-    assert.equal(activeTimers.size, 0);
-
-    renderResult(
-      { content: [{ type: "text", text: "running" }], details: runningDetails },
-      { expanded: false, isPartial: true },
-      theme,
-      context,
-    );
-    assert.equal(activeTimers.size, 1);
-    handlers.get("session_shutdown")?.({});
-    assert.equal(activeTimers.size, 0);
-  } finally {
-    const finalComponent = renderResult(
-      { content: [{ type: "text", text: "done" }], details: finalDetails },
-      { expanded: false, isPartial: false },
-      theme,
-      context,
-    );
-    assert.equal(activeTimers.size, 0);
-    assert.match(finalComponent.render(100).join("\n"), /2\/2 complete/);
-  }
+  const finalComponent = renderResult(
+    { content: [{ type: "text", text: "done" }], details: finalDetails },
+    { expanded: false, isPartial: false },
+    theme,
+    context,
+  );
+  assert.match(finalComponent.render(100).join("\n"), /2\/2 complete/);
 });
