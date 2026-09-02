@@ -3,8 +3,9 @@
  *
  * Layout: project[⎇workspace][/subdir]@branch (#pr) ↑a ↓b (+x -y ?z) | model · thinking | [bar] pct% / size | quotas | $cost
  *
- * - folder/branch, ahead/behind, tracked diffstats, and untracked file count come from git
- *   (refreshed asynchronously at most once per CACHE_TTL_MS; branch changes refresh immediately)
+ * - folder/branch, ahead/behind, tracked diffstats, and untracked file count come from git,
+ *   polled every GIT_REFRESH_INTERVAL_MS off the render path with reads that never overlap;
+ *   branch changes refresh immediately, and untracked counting stops at UNTRACKED_LIMIT ("?10000+")
  * - the current branch's pull request number and status come from `gh pr view`;
  *   red means failed CI/changes requested, yellow means pending CI/review activity,
  *   green means ready to merge, accent means merged, and dim means another state
@@ -19,18 +20,20 @@
  * Not portable from the Claude statusline: the identity chip (pi runs a single identity).
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { basename, dirname, relative, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
-const CACHE_TTL_MS = 2000;
+const GIT_REFRESH_INTERVAL_MS = 2000;
+const GIT_TIMEOUT_MS = 3000;
+const UNTRACKED_LIMIT = 10_000;
 const PR_CACHE_TTL_MS = 60_000;
 const PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 /** Tools that run a separate agent, whose usage is reported as agent cost rather than main. */
 const AGENT_TOOLS = new Set(["subagent", "claude"]);
 
-interface GitInfo {
+export interface GitInfo {
   /** Display name for the folder part, e.g. "home/src" or "home⎇feat-x/src" */
   dir: string;
   ahead: number;
@@ -38,13 +41,20 @@ interface GitInfo {
   added: number;
   deleted: number;
   untracked: number;
+  /** Counting stopped at UNTRACKED_LIMIT or git was cut off, so the real count is higher. */
+  untrackedTruncated: boolean;
 }
 
-interface GitCache {
-  cwd: string;
-  at: number;
-  info: GitInfo | null;
-  refresh: Promise<void> | null;
+export interface UntrackedCount {
+  count: number;
+  truncated: boolean;
+}
+
+export interface GitStatusPoller {
+  current(): GitInfo | null;
+  /** Read again now, or right after the read in flight finishes. */
+  refresh(): void;
+  dispose(): void;
 }
 
 type PullRequestStatus = "failed" | "pending" | "ready" | "merged" | "other";
@@ -65,8 +75,6 @@ interface ProviderQuota {
   windows: QuotaWindow[];
 }
 
-let gitCache: GitCache | null = null;
-
 function runGit(cwd: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(
@@ -74,10 +82,65 @@ function runGit(cwd: string, args: string[]): Promise<string | null> {
       ["-C", cwd, "--no-optional-locks", ...args],
       {
         encoding: "utf8",
-        timeout: 3000,
+        timeout: GIT_TIMEOUT_MS,
       },
       (error, stdout) => resolve(error ? null : stdout.trim()),
     );
+  });
+}
+
+/**
+ * Counts untracked files by streaming `git ls-files -z` and counting separators, so a huge
+ * untracked tree is never held in memory (execFile's default buffer would drop it entirely).
+ * Counting stops at `limit`; the result is then reported as truncated.
+ */
+export function countUntrackedFiles(
+  cwd: string,
+  limit = UNTRACKED_LIMIT,
+): Promise<UntrackedCount | null> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      "git",
+      [
+        "-C",
+        cwd,
+        "--no-optional-locks",
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ":/",
+      ],
+      { stdio: ["ignore", "pipe", "ignore"], timeout: GIT_TIMEOUT_MS },
+    );
+    let count = 0;
+    let truncated = false;
+    let settled = false;
+    const finish = (value: UntrackedCount | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (truncated) return;
+      for (let offset = chunk.indexOf(0); offset !== -1; offset = chunk.indexOf(0, offset + 1)) {
+        if (++count > limit) {
+          count = limit;
+          truncated = true;
+          child.kill();
+          return;
+        }
+      }
+    });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => {
+      if (truncated) return finish({ count, truncated: true });
+      if (code === 0) return finish({ count, truncated: false });
+      // git failed, or the timeout cut it off after a partial listing.
+      finish(count > 0 ? { count, truncated: true } : null);
+    });
   });
 }
 
@@ -85,11 +148,11 @@ async function readGitInfo(cwd: string): Promise<GitInfo | null> {
   const toplevel = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
   if (!toplevel) return null;
 
-  const [commonDir, ab, numstat, untrackedOutput] = await Promise.all([
+  const [commonDir, ab, numstat, untrackedCount] = await Promise.all([
     runGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     runGit(cwd, ["rev-list", "--left-right", "--count", "@{u}...HEAD"]),
     runGit(cwd, ["diff", "--numstat", "HEAD", "--"]),
-    runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--", ":/"]),
+    countUntrackedFiles(cwd),
   ]);
 
   // Worktree detection: main worktree root is the parent of the common git dir.
@@ -124,40 +187,72 @@ async function readGitInfo(cwd: string): Promise<GitInfo | null> {
     }
   }
 
-  const untracked = untrackedOutput?.split("\0").filter(Boolean).length ?? 0;
-  return { dir, ahead, behind, added, deleted, untracked };
+  return {
+    dir,
+    ahead,
+    behind,
+    added,
+    deleted,
+    untracked: untrackedCount?.count ?? 0,
+    untrackedTruncated: untrackedCount?.truncated ?? false,
+  };
 }
 
-function loadGitInfo(cwd: string, onRefresh: () => void): GitInfo | null {
-  if (!gitCache || gitCache.cwd !== cwd) {
-    gitCache = { cwd, at: 0, info: null, refresh: null };
-  }
+/**
+ * Polls git on a timer so rendering never spawns processes. Reads never overlap: a refresh
+ * requested while one is running is queued and runs once it finishes. pi-tui exposes no
+ * terminal focus signal, so polling continues while the terminal is unfocused.
+ */
+export function createGitStatusPoller(options: {
+  cwd: () => string;
+  read?: (cwd: string) => Promise<GitInfo | null>;
+  intervalMs?: number;
+  onChange: () => void;
+}): GitStatusPoller {
+  const { cwd, read = readGitInfo, intervalMs = GIT_REFRESH_INTERVAL_MS, onChange } = options;
+  let info: GitInfo | null = null;
+  let inFlight = false;
+  let queued = false;
+  let disposed = false;
 
-  const current = gitCache;
-  if (!current.refresh && Date.now() - current.at >= CACHE_TTL_MS) {
-    current.refresh = readGitInfo(cwd)
-      .then((info) => {
-        if (gitCache !== current) return;
-        current.info = info;
-        current.at = Date.now();
-      })
-      .catch(() => {
-        if (gitCache !== current) return;
-        current.info = null;
-        current.at = Date.now();
-      })
-      .finally(() => {
-        if (gitCache !== current) return;
-        current.refresh = null;
-        onRefresh();
+  const refresh = () => {
+    if (disposed) return;
+    if (inFlight) {
+      queued = true;
+      return;
+    }
+
+    inFlight = true;
+    const directory = cwd();
+    void read(directory)
+      .catch(() => null)
+      .then((next) => {
+        inFlight = false;
+        if (disposed) return;
+        if (directory !== cwd()) {
+          queued = true;
+        } else if (JSON.stringify(next) !== JSON.stringify(info)) {
+          info = next;
+          onChange();
+        }
+        if (queued) {
+          queued = false;
+          refresh();
+        }
       });
-  }
+  };
 
-  return current.info;
-}
+  const timer = setInterval(refresh, intervalMs);
+  refresh();
 
-function invalidateGitCache(): void {
-  gitCache = null;
+  return {
+    current: () => info,
+    refresh,
+    dispose() {
+      disposed = true;
+      clearInterval(timer);
+    },
+  };
 }
 
 export function classifyPullRequest(data: Record<string, unknown>): PullRequestStatus {
@@ -498,8 +593,14 @@ export default function (pi: ExtensionAPI) {
           });
       };
 
+      const gitStatus = createGitStatusPoller({
+        cwd: () => ctx.cwd,
+        onChange: () => {
+          if (!disposed) tui.requestRender();
+        },
+      });
       const unsubscribe = footerData.onBranchChange(() => {
-        invalidateGitCache();
+        gitStatus.refresh();
         refreshPullRequest(true);
         tui.requestRender();
       });
@@ -514,6 +615,7 @@ export default function (pi: ExtensionAPI) {
         dispose() {
           disposed = true;
           unsubscribe();
+          gitStatus.dispose();
           clearInterval(quotaTimer);
           clearInterval(pullRequestTimer);
           quotaAbort.abort();
@@ -529,9 +631,7 @@ export default function (pi: ExtensionAPI) {
           const parts: string[] = [];
 
           const branch = footerData.getGitBranch();
-          const git = loadGitInfo(ctx.cwd, () => {
-            if (!disposed) tui.requestRender();
-          });
+          const git = gitStatus.current();
           if (git) {
             let folder = compactDirectory(git.dir);
             if (branch) {
@@ -559,7 +659,8 @@ export default function (pi: ExtensionAPI) {
                 changes.push(theme.fg("toolDiffRemoved", `-${git.deleted}`));
               }
               if (git.untracked > 0) {
-                changes.push(theme.fg("warning", `?${git.untracked}`));
+                const suffix = git.untrackedTruncated ? "+" : "";
+                changes.push(theme.fg("warning", `?${git.untracked}${suffix}`));
               }
               if (changes.length > 0) {
                 folder +=
