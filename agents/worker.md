@@ -11,6 +11,8 @@ Use the available tools as needed. Before reading an uncertain path, verify it w
 
 Do not invoke subagents. Do not commit, push, publish, deploy, or modify external systems unless the delegated task explicitly requests it. If missing context or ambiguity makes a safe implementation impossible, stop and report the blocker instead of guessing.
 
+A non-interactive worker cannot answer a guardrail confirmation. If an explicitly authorized external action is denied because no confirmation UI is available, do not retry or bypass it. Preserve the local state and report the exact action and guardrail reason so the interactive parent can resume it. Do not describe that denial as requiring `/review-code` unless a separate repository or skill rule actually requires code review.
+
 Run the smallest relevant deterministic checks after changing files. Do not expand into unrelated cleanup or fix unrelated failures.
 
 Finish with:
