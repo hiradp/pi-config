@@ -47,6 +47,7 @@ const MAX_CONCURRENCY = 4;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 const MODEL_VISIBLE_OUTPUT_CAP = 50 * 1024;
 const MODEL_VISIBLE_OUTPUT_LINES = 2000;
+const KILL_GRACE_MS = 5000;
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -730,6 +731,104 @@ export function resolveDispatchConfig(
   };
 }
 
+export interface ChildProcessOptions {
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  killGraceMs?: number;
+  /** Receives every JSON event line the child writes to stdout. */
+  onEvent?: (event: any) => void;
+}
+
+export interface ChildProcessOutcome {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  aborted: boolean;
+  stderr: string;
+  spawnError?: string;
+}
+
+/**
+ * Spawn a JSON-mode child in its own process group, feed each stdout line to
+ * `onEvent`, and resolve once the process closes.
+ */
+export function runChildProcess(
+  command: string,
+  args: string[],
+  options: ChildProcessOptions,
+): Promise<ChildProcessOutcome> {
+  return new Promise((resolve) => {
+    const proc = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      detached: process.platform !== "win32",
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
+    let buffer = "";
+    let stderr = "";
+    let aborted = false;
+    let spawnError: string | undefined;
+    let processClosed = false;
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    let abortHandler: (() => void) | undefined;
+
+    const finish = (code: number | null, closeSignal: NodeJS.Signals | null) => {
+      if (processClosed) return;
+      processClosed = true;
+      if (forceKillTimer && !aborted) clearTimeout(forceKillTimer);
+      if (options.signal && abortHandler) options.signal.removeEventListener("abort", abortHandler);
+      resolve({ code, signal: closeSignal, aborted, stderr, spawnError });
+    };
+
+    const processLine = (line: string) => {
+      if (!line.trim()) return;
+      let event: unknown;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (event && typeof event === "object") options.onEvent?.(event);
+    };
+
+    proc.stdout.on("data", (data) => {
+      buffer += data.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) processLine(line);
+    });
+
+    proc.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    proc.on("close", (code, closeSignal) => {
+      if (buffer.trim()) processLine(buffer);
+      finish(code, closeSignal);
+    });
+
+    proc.on("error", (error) => {
+      spawnError = error.message;
+      finish(1, null);
+    });
+
+    if (options.signal) {
+      abortHandler = () => {
+        if (aborted) return;
+        aborted = true;
+        if (proc.pid === undefined) return;
+        signalProcessTree(proc.pid, "SIGTERM");
+        forceKillTimer = setTimeout(() => signalProcessTree(proc.pid!, "SIGKILL"), killGraceMs);
+        forceKillTimer.unref?.();
+      };
+      if (options.signal.aborted) abortHandler();
+      else options.signal.addEventListener("abort", abortHandler, { once: true });
+    }
+  });
+}
+
 async function runSingleAgent(
   defaultCwd: string,
   dispatchDefaults: DispatchDefaults,
@@ -823,101 +922,42 @@ async function runSingleAgent(
     }
 
     args.push(`Task: ${task}`);
-    let wasAborted = false;
+    const invocation = getPiInvocation(args);
+    const outcome = await runChildProcess(invocation.command, invocation.args, {
+      cwd: cwd ?? defaultCwd,
+      signal,
+      onEvent: (event) => {
+        if (event.type === "message_end" && event.message) {
+          const msg = event.message as Message;
+          currentResult.messages.push(msg);
 
-    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve) => {
-        const invocation = getPiInvocation(args);
-        const proc = spawn(invocation.command, invocation.args, {
-          cwd: cwd ?? defaultCwd,
-          detached: process.platform !== "win32",
-          shell: false,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        let buffer = "";
-        let processClosed = false;
-        let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-        let abortHandler: (() => void) | undefined;
-
-        const finish = (code: number | null, closeSignal: NodeJS.Signals | null) => {
-          if (processClosed) return;
-          processClosed = true;
-          if (forceKillTimer && !wasAborted) clearTimeout(forceKillTimer);
-          if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
-          resolve({ code, signal: closeSignal });
-        };
-
-        const processLine = (line: string) => {
-          if (!line.trim()) return;
-          let event: any;
-          try {
-            event = JSON.parse(line);
-          } catch {
-            return;
-          }
-
-          if (event.type === "message_end" && event.message) {
-            const msg = event.message as Message;
-            currentResult.messages.push(msg);
-
-            if (msg.role === "assistant") {
-              currentResult.usage.turns++;
-              const usage = msg.usage;
-              if (usage) {
-                addUsage(currentResult.usage.total, usage);
-                currentResult.usage.contextTokens = usage.totalTokens;
-              }
-              if (!currentResult.model && msg.model) currentResult.model = msg.model;
-              if (msg.stopReason) currentResult.stopReason = msg.stopReason;
-              if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
-            } else if (msg.role === "toolResult" && msg.usage) {
-              addUsage(currentResult.usage.total, msg.usage);
+          if (msg.role === "assistant") {
+            currentResult.usage.turns++;
+            const usage = msg.usage;
+            if (usage) {
+              addUsage(currentResult.usage.total, usage);
+              currentResult.usage.contextTokens = usage.totalTokens;
             }
-            emitUpdate();
+            if (!currentResult.model && msg.model) currentResult.model = msg.model;
+            if (msg.stopReason) currentResult.stopReason = msg.stopReason;
+            if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+          } else if (msg.role === "toolResult" && msg.usage) {
+            addUsage(currentResult.usage.total, msg.usage);
           }
+          emitUpdate();
+        }
 
-          if (event.type === "compaction_end" && event.result?.usage) {
-            addUsage(currentResult.usage.total, event.result.usage as Usage);
-          }
-        };
-
-        proc.stdout.on("data", (data) => {
-          buffer += data.toString();
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) processLine(line);
-        });
-
-        proc.stderr.on("data", (data) => {
-          currentResult.stderr += data.toString();
-        });
-
-        proc.on("close", (code, closeSignal) => {
-          if (buffer.trim()) processLine(buffer);
-          finish(code, closeSignal);
-        });
-
-        proc.on("error", (error) => {
-          currentResult.errorMessage = `Failed to start subagent: ${error.message}`;
-          finish(1, null);
-        });
-
-        if (signal) {
-          abortHandler = () => {
-            if (wasAborted) return;
-            wasAborted = true;
-            if (proc.pid === undefined) return;
-            signalProcessTree(proc.pid, "SIGTERM");
-            forceKillTimer = setTimeout(() => signalProcessTree(proc.pid!, "SIGKILL"), 5000);
-            forceKillTimer.unref?.();
-          };
-          if (signal.aborted) abortHandler();
-          else signal.addEventListener("abort", abortHandler, { once: true });
+        if (event.type === "compaction_end" && event.result?.usage) {
+          addUsage(currentResult.usage.total, event.result.usage as Usage);
         }
       },
-    );
+    });
 
-    const status = classifyChildExit(exit.code, exit.signal, wasAborted);
+    currentResult.stderr = outcome.stderr;
+    if (outcome.spawnError) {
+      currentResult.errorMessage = `Failed to start subagent: ${outcome.spawnError}`;
+    }
+    const status = classifyChildExit(outcome.code, outcome.signal, outcome.aborted);
     currentResult.exitCode = status.exitCode;
     if (status.stopReason) currentResult.stopReason = status.stopReason;
     if (status.errorMessage) currentResult.errorMessage = status.errorMessage;
