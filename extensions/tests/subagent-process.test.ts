@@ -30,3 +30,16 @@ test("decodes multibyte characters split across stdout chunks", async () => {
   assert.equal(events.length, 1);
   assert.equal(events[0].message.content[0].text, "🙂 done");
 });
+
+test("keeps only the tail of oversized stderr", async () => {
+  const outcome = await runNode(
+    'process.stderr.write("é".repeat(60_000) + "\\n");process.stderr.write("tail marker\\n")',
+    { cwd: process.cwd(), maxStderrBytes: 4096 },
+  );
+
+  assert.equal(outcome.code, 0);
+  assert.equal(outcome.stderrTruncated, true);
+  assert.ok(Buffer.byteLength(outcome.stderr, "utf8") <= 4096);
+  assert.ok(outcome.stderr.endsWith("tail marker\n"));
+  assert.equal(outcome.stderr.includes("�"), false);
+});

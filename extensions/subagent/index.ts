@@ -49,6 +49,7 @@ const PER_TASK_OUTPUT_CAP = 50 * 1024;
 const MODEL_VISIBLE_OUTPUT_CAP = 50 * 1024;
 const MODEL_VISIBLE_OUTPUT_LINES = 2000;
 const KILL_GRACE_MS = 5000;
+const MAX_STDERR_BYTES = 64 * 1024;
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -240,6 +241,8 @@ interface SingleResult {
   exitCode: number;
   messages: Message[];
   stderr: string;
+  /** Set when stderr exceeded its byte budget and only the tail was kept. */
+  stderrTruncated?: boolean;
   usage: UsageStats;
   model?: string;
   stopReason?: string;
@@ -388,7 +391,7 @@ export function truncateOutput(
     ]
       .filter(Boolean)
       .join(" and ");
-    result = `${truncated}\n\n[Output truncated: ${omitted} omitted. Full output preserved in tool details.]`;
+    result = `${truncated}\n\n[Output truncated: ${omitted} omitted.]`;
     if (Buffer.byteLength(result, "utf8") > maxBytes) truncated = truncated.slice(0, -1);
   } while (Buffer.byteLength(result, "utf8") > maxBytes);
 
@@ -737,6 +740,7 @@ export interface ChildProcessOptions {
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   killGraceMs?: number;
+  maxStderrBytes?: number;
   /** Receives every JSON event line the child writes to stdout. */
   onEvent?: (event: any) => void;
 }
@@ -746,7 +750,18 @@ export interface ChildProcessOutcome {
   signal: NodeJS.Signals | null;
   aborted: boolean;
   stderr: string;
+  stderrTruncated: boolean;
   spawnError?: string;
+}
+
+/** Keep at most the last `maxBytes` bytes of text, dropping any partial leading character. */
+export function tailBytes(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  return bytes
+    .subarray(bytes.length - maxBytes)
+    .toString("utf8")
+    .replace(/^�+/, "");
 }
 
 /**
@@ -767,10 +782,12 @@ export function runChildProcess(
       stdio: ["ignore", "pipe", "pipe"],
     });
     const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
+    const maxStderrBytes = options.maxStderrBytes ?? MAX_STDERR_BYTES;
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
     let buffer = "";
     let stderr = "";
+    let stderrTruncated = false;
     let aborted = false;
     let spawnError: string | undefined;
     let processClosed = false;
@@ -782,7 +799,15 @@ export function runChildProcess(
       processClosed = true;
       if (forceKillTimer && !aborted) clearTimeout(forceKillTimer);
       if (options.signal && abortHandler) options.signal.removeEventListener("abort", abortHandler);
-      resolve({ code, signal: closeSignal, aborted, stderr, spawnError });
+      resolve({ code, signal: closeSignal, aborted, stderr, stderrTruncated, spawnError });
+    };
+
+    const appendStderr = (text: string) => {
+      stderr += text;
+      if (Buffer.byteLength(stderr, "utf8") > maxStderrBytes) {
+        stderr = tailBytes(stderr, maxStderrBytes);
+        stderrTruncated = true;
+      }
     };
 
     const processLine = (line: string) => {
@@ -804,12 +829,12 @@ export function runChildProcess(
     });
 
     proc.stderr.on("data", (data: Buffer) => {
-      stderr += stderrDecoder.write(data);
+      appendStderr(stderrDecoder.write(data));
     });
 
     proc.on("close", (code, closeSignal) => {
       buffer += stdoutDecoder.end();
-      stderr += stderrDecoder.end();
+      appendStderr(stderrDecoder.end());
       if (buffer.trim()) processLine(buffer);
       finish(code, closeSignal);
     });
@@ -959,6 +984,7 @@ async function runSingleAgent(
     });
 
     currentResult.stderr = outcome.stderr;
+    if (outcome.stderrTruncated) currentResult.stderrTruncated = true;
     if (outcome.spawnError) {
       currentResult.errorMessage = `Failed to start subagent: ${outcome.spawnError}`;
     }
