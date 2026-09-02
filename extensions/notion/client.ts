@@ -1,4 +1,4 @@
-import { extractToken } from "./auth.ts";
+import { extractToken, invalidateToken } from "./auth.ts";
 import { renderBlocks, richTextToMarkdown, richTextToPlainText, tableCell } from "./markdown.ts";
 import type {
   NotionBlock,
@@ -12,35 +12,57 @@ import type {
   SpaceInfo,
   StoredRecord,
 } from "./types.ts";
-import { asRecord, blockProperty, notionUrl, parseNotionId, stringArray, unwrap } from "./utils.ts";
+import {
+  asRecord,
+  blockProperty,
+  notionUrl,
+  parseNotionId,
+  sanitizeDisplayText,
+  stringArray,
+  unwrap,
+} from "./utils.ts";
 
 const API_TIMEOUT_MS = 20_000;
-const MAX_DATABASE_ROWS = 100;
-const MAX_PAGE_CHUNKS = 10;
+export const MAX_DATABASE_ROWS = 100;
+export const MAX_PAGE_CHUNKS = 10;
 export const SEARCH_RESULTS_PER_SPACE = 20;
 
 let cachedSpaces: SpaceInfo[] | undefined;
 
-async function notionRead<T>(
+function postNotion(
   endpoint: ReadEndpoint,
   body: unknown,
+  token: string,
   signal?: AbortSignal,
-): Promise<T> {
-  const token = extractToken();
+): Promise<Response> {
   const timeout = AbortSignal.timeout(API_TIMEOUT_MS);
-  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  const response = await fetch(`https://www.notion.so/api/v3/${endpoint}`, {
+  return fetch(`https://www.notion.so/api/v3/${endpoint}`, {
     method: "POST",
     headers: {
       Cookie: `token_v2=${encodeURIComponent(token)}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    signal: requestSignal,
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
+}
+
+async function notionRead<T>(
+  endpoint: ReadEndpoint,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const token = await extractToken({ signal });
+  let response = await postNotion(endpoint, body, token, signal);
+  if (response.status === 401) {
+    // Logging in again changes the cookie, so re-extract it once before giving up.
+    invalidateToken();
+    const freshToken = await extractToken({ signal });
+    if (freshToken !== token) response = await postNotion(endpoint, body, freshToken, signal);
+  }
 
   if (!response.ok) {
-    const responseText = (await response.text()).trim().slice(0, 500);
+    const responseText = sanitizeDisplayText((await response.text()).trim()).slice(0, 500);
     throw new Error(
       `Notion read failed (${response.status})${responseText ? `: ${responseText}` : ""}`,
     );
@@ -194,10 +216,8 @@ async function discoverSpaces(signal?: AbortSignal): Promise<SpaceInfo[]> {
     for (const id of Object.keys(asRecord(user?.space) ?? {})) ids.add(id);
   }
 
-  if (!ids.size) {
-    cachedSpaces = [];
-    return cachedSpaces;
-  }
+  // An empty list is more likely a transient response than a fact worth caching.
+  if (!ids.size) return [];
 
   const names = await notionRead<NotionResponse>(
     "syncRecordValues",
