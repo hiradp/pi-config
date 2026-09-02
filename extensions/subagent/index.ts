@@ -51,6 +51,9 @@ const MODEL_VISIBLE_OUTPUT_LINES = 2000;
 const KILL_GRACE_MS = 5000;
 const MAX_STDERR_BYTES = 64 * 1024;
 const DEFAULT_CHILD_TIMEOUT_MS = 45 * 60 * 1000;
+const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
+/** Delegation tools a child never receives, so a subagent cannot fan out further. */
+const CHILD_EXCLUDED_TOOLS = ["subagent", "claude"];
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -259,6 +262,8 @@ interface SubagentDetails {
   agentScope: AgentScope;
   projectAgentsDir: string | null;
   results: SingleResult[];
+  /** Set when the dispatch was refused before any child ran. */
+  failure?: string;
 }
 
 function isFailureState(exitCode: unknown, stopReason: unknown): boolean {
@@ -272,6 +277,7 @@ function isFailureState(exitCode: unknown, stopReason: unknown): boolean {
 
 export function hasFailedSubagentResult(details: unknown): boolean {
   if (!details || typeof details !== "object") return false;
+  if (typeof (details as { failure?: unknown }).failure === "string") return true;
   const results = (details as { results?: unknown }).results;
   if (!Array.isArray(results)) return false;
 
@@ -985,6 +991,29 @@ interface ChildRunOptions {
   registry: ChildProcessRegistry;
 }
 
+/** CLI arguments for a child Pi, before the system prompt and task are appended. */
+export function buildChildArgs(
+  agent: Pick<AgentConfig, "tools">,
+  config: ResolvedDispatchConfig,
+): string[] {
+  const args = ["--mode", "json", "-p", "--no-session"];
+  args.push("--exclude-tools", CHILD_EXCLUDED_TOOLS.join(","));
+  if (config.model) args.push("--model", config.model);
+  if (config.thinkingLevel) args.push("--thinking", config.thinkingLevel);
+  if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+  return args;
+}
+
+function subagentDepth(env: NodeJS.ProcessEnv): number {
+  const depth = Number.parseInt(env[SUBAGENT_DEPTH_ENV] ?? "", 10);
+  return Number.isFinite(depth) && depth > 0 ? depth : 0;
+}
+
+/** Environment for a child Pi, marking it as one level deeper than this process. */
+export function childEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...env, [SUBAGENT_DEPTH_ENV]: String(subagentDepth(env) + 1) };
+}
+
 async function runSingleAgent(
   defaultCwd: string,
   dispatchDefaults: DispatchDefaults,
@@ -1020,12 +1049,7 @@ async function runSingleAgent(
     };
   }
 
-  const args: string[] = ["--mode", "json", "-p", "--no-session"];
-  if (dispatchConfig.model) args.push("--model", dispatchConfig.model);
-  if (dispatchConfig.thinkingLevel) {
-    args.push("--thinking", dispatchConfig.thinkingLevel);
-  }
-  if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+  const args = buildChildArgs(agent, dispatchConfig);
 
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
@@ -1082,6 +1106,7 @@ async function runSingleAgent(
     const invocation = getPiInvocation(args);
     const outcome = await runChildProcess(invocation.command, invocation.args, {
       cwd: cwd ?? defaultCwd,
+      env: childEnvironment(process.env),
       signal,
       timeoutMs: runOptions.timeoutMs,
       registry: runOptions.registry,
@@ -1274,6 +1299,18 @@ export default function (
           projectAgentsDir: discovery.projectAgentsDir,
           results,
         });
+      const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
+      const refuse = (text: string): AgentToolResult<SubagentDetails> => ({
+        content: [{ type: "text", text }],
+        details: { ...makeDetails(mode)([]), failure: text },
+      });
+
+      const depth = subagentDepth(process.env);
+      if (depth > 0) {
+        return refuse(
+          `Nested dispatch refused: this Pi process is already running as a subagent (depth ${depth}). Do the work directly and report anything you could not finish.`,
+        );
+      }
 
       if (modeCount !== 1) {
         const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
