@@ -11,6 +11,7 @@ import {
 
 const MAX_MCP_RESPONSE_BYTES = 2_000_000;
 const SLACK_PROTOCOL_VERSION = "2025-06-18";
+const TERMINATE_TIMEOUT_MS = 5_000;
 
 export interface McpConnection {
   connect(signal?: AbortSignal): Promise<void>;
@@ -65,8 +66,9 @@ export class SlackMcpClient {
   ): Promise<SlackCallResult> {
     signal?.throwIfAborted();
     for (let attempt = 0; attempt < 2; attempt++) {
+      let active: ActiveConnection | undefined;
       try {
-        const active = await this.getActive(signal);
+        active = await this.getActive(signal);
         const result = await active.connection.callTool(
           operationName(operation),
           args,
@@ -89,7 +91,11 @@ export class SlackMcpClient {
           continue;
         }
         if (error instanceof SlackHttpError && error.status === 401) {
-          await this.auth.forceRefresh(signal);
+          // A concurrent refresh may already have rotated the token; reconnect with it rather
+          // than spending another single-use refresh token.
+          if (!active || active.revision === this.auth.revision) {
+            await this.auth.forceRefresh(signal);
+          }
           await this.closeActive();
           continue;
         }
@@ -169,7 +175,7 @@ export class SlackMcpClient {
   }
 }
 
-class SlackHttpError extends Error {
+export class SlackHttpError extends Error {
   readonly status: number;
   readonly retryAfterMs?: number;
 
@@ -350,11 +356,24 @@ async function listAllTools(
 
 async function safeClose(connection: McpConnection): Promise<void> {
   try {
-    await connection.terminate();
+    // Termination is best effort and may run under the auth transition lock; close() aborts a
+    // DELETE that outlives the deadline.
+    await withDeadline(connection.terminate(), TERMINATE_TIMEOUT_MS);
   } catch {}
   try {
     await connection.close();
   } catch {}
+}
+
+function withDeadline<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("Slack MCP session termination timed out.")),
+      milliseconds,
+    );
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
 function combinedSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
