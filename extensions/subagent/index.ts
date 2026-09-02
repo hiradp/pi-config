@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Message, Usage } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -766,6 +767,8 @@ export function runChildProcess(
       stdio: ["ignore", "pipe", "pipe"],
     });
     const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     let buffer = "";
     let stderr = "";
     let aborted = false;
@@ -793,18 +796,20 @@ export function runChildProcess(
       if (event && typeof event === "object") options.onEvent?.(event);
     };
 
-    proc.stdout.on("data", (data) => {
-      buffer += data.toString();
+    proc.stdout.on("data", (data: Buffer) => {
+      buffer += stdoutDecoder.write(data);
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) processLine(line);
     });
 
-    proc.stderr.on("data", (data) => {
-      stderr += data.toString();
+    proc.stderr.on("data", (data: Buffer) => {
+      stderr += stderrDecoder.write(data);
     });
 
     proc.on("close", (code, closeSignal) => {
+      buffer += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
       if (buffer.trim()) processLine(buffer);
       finish(code, closeSignal);
     });
