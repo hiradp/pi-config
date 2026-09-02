@@ -23,6 +23,27 @@ const AUTHORIZATION_METADATA_URL = `${SLACK_OAUTH_ISSUER}/.well-known/oauth-auth
 const RESOURCE_METADATA_URL = `${SLACK_MCP_RESOURCE}/.well-known/oauth-protected-resource`;
 const MAX_OAUTH_RESPONSE_BYTES = 100_000;
 const SLACK_AUTH_TEST_ENDPOINT = "https://slack.com/api/auth.test";
+/**
+ * Token-endpoint errors after which the grant or refresh token is unusable. Slack reports service
+ * failures such as internal_error as HTTP 200 with ok:false, so every other error is transient.
+ */
+const TERMINAL_TOKEN_ERRORS = new Set([
+  "invalid_refresh_token",
+  "token_revoked",
+  "token_expired",
+  "account_inactive",
+  "invalid_grant",
+  "invalid_grant_type",
+  "invalid_code",
+  "invalid_client",
+  "invalid_client_id",
+  "bad_client_secret",
+  "unauthorized_client",
+  "bad_redirect_uri",
+  "oauth_authorization_url_mismatch",
+  "invalid_scope",
+  "access_denied",
+]);
 
 export type BrowserOpener = (url: URL) => Promise<void>;
 
@@ -102,6 +123,7 @@ export class SlackAuth {
   private loaded = false;
   private loadFlight?: Promise<SlackCredentials | undefined>;
   private refreshFlight?: Promise<SlackCredentials>;
+  private metadata?: OAuthMetadata;
   private loginController?: AbortController;
   private loginSettled?: Promise<void>;
   private revisionValue = 0;
@@ -161,6 +183,7 @@ export class SlackAuth {
       const loginConfig = await this.configForLogin(providedClientId);
       flowSignal.throwIfAborted();
       const metadata = await discoverOAuthMetadata(this.fetchImpl, flowSignal);
+      this.metadata = metadata;
       const verifier = createPkceVerifier();
       const challenge = createPkceChallenge(verifier);
       const state = randomBytes(32).toString("base64url");
@@ -230,12 +253,7 @@ export class SlackAuth {
     signal?.throwIfAborted();
     let credentials = await this.load();
     if (!credentials) throw new Error("Slack is not authenticated. Run /slack-login in the TUI.");
-    if (
-      credentials.expiresAt !== undefined &&
-      credentials.expiresAt - this.now() <= this.config.refreshLeewayMs
-    ) {
-      credentials = await this.refresh(credentials, signal);
-    }
+    if (this.isExpiring(credentials)) credentials = await this.refresh(credentials, signal);
     signal?.throwIfAborted();
     return { accessToken: credentials.accessToken, revision: this.revisionValue };
   }
@@ -337,72 +355,128 @@ export class SlackAuth {
   ): Promise<SlackCredentials> {
     if (!force && current.expiresAt === undefined) return current;
     if (!current.refreshToken) {
+      if (force && !this.isExpiring(current)) {
+        throw new Error(
+          "Slack rejected the stored access token. Run /slack-logout and /slack-login if it persists.",
+        );
+      }
       await this.invalidate();
       throw new Error("Slack authentication expired. Run /slack-login again.");
     }
-    if (this.refreshFlight) return this.refreshFlight;
+    // One flight serves every concurrent caller; a caller's abort only detaches that caller.
+    this.refreshFlight ??= this.runRefresh(current).finally(() => {
+      this.refreshFlight = undefined;
+    });
+    return awaitWithSignal(this.refreshFlight, signal);
+  }
 
+  private async runRefresh(current: SlackCredentials): Promise<SlackCredentials> {
     const refreshGeneration = this.generation;
-    this.refreshFlight = (async () => {
-      const requestSignal = combinedSignal(signal, this.config.requestTimeoutMs);
-      let invalidateCredentials = false;
-      try {
-        const metadata = await discoverOAuthMetadata(this.fetchImpl, requestSignal);
-        const effectiveConfig = await this.configForStoredCredentials(current);
-        let token: TokenResponse;
-        try {
-          token = await refreshAccessToken(
-            this.fetchImpl,
-            metadata.authorization,
-            effectiveConfig,
-            current.refreshToken!,
-            requestSignal,
-          );
-        } catch (error) {
-          invalidateCredentials =
-            error instanceof SlackTokenRejectedError || error instanceof SlackTokenValidationError;
-          throw error;
-        }
+    // Slack refresh tokens are single-use, and another Pi process sharing the credential store
+    // may have rotated them already; adopt its result instead of repeating the refresh.
+    const stored = await this.store.load();
+    if (stored?.refreshToken !== current.refreshToken) {
+      await this.adopt(stored);
+      if (!stored) throw new Error("Slack is not authenticated. Run /slack-login in the TUI.");
+      if (!stored.refreshToken || !this.isExpiring(stored)) return stored;
+      current = stored;
+    }
 
-        let refreshed: SlackCredentials;
-        try {
-          refreshed = validateRefreshedToken(token, current, effectiveConfig, this.now());
-          invalidateCredentials = true;
-        } catch (error) {
-          invalidateCredentials = true;
-          throw error;
-        }
-        await this.transitionLock.run(async () => {
-          if (refreshGeneration !== this.generation) {
-            throw new Error("Slack authentication changed while refreshing.");
-          }
-          await this.store.save(refreshed);
-          if (refreshGeneration !== this.generation) {
-            await this.store.delete();
-            throw new Error("Slack authentication changed while refreshing.");
-          }
-          this.credentials = refreshed;
-          this.loaded = true;
-          this.revisionValue++;
-        });
-        return refreshed;
+    const requestSignal = AbortSignal.timeout(this.config.requestTimeoutMs);
+    let terminal = false;
+    try {
+      const metadata = await this.oauthMetadata(requestSignal);
+      const effectiveConfig = await this.configForStoredCredentials(current);
+      let token: TokenResponse;
+      try {
+        token = await refreshAccessToken(
+          this.fetchImpl,
+          metadata.authorization,
+          effectiveConfig,
+          current.refreshToken!,
+          requestSignal,
+        );
       } catch (error) {
-        if (signal?.aborted) throw new Error("Slack request was cancelled.");
+        terminal =
+          error instanceof SlackTokenRejectedError || error instanceof SlackTokenValidationError;
+        throw error;
+      }
+      // Slack has consumed the refresh token; a failure from here leaves the stored one unusable.
+      terminal = true;
+      const refreshed = validateRefreshedToken(token, current, effectiveConfig, this.now());
+      await this.transitionLock.run(async () => {
         if (refreshGeneration !== this.generation) {
           throw new Error("Slack authentication changed while refreshing.");
         }
-        if (invalidateCredentials) await this.invalidate();
-        if (isSafeOAuthError(error)) throw error;
-        throw new Error(
-          invalidateCredentials
-            ? "Slack credentials could not be refreshed and were removed."
-            : "Slack credentials could not be refreshed. Retry later.",
-        );
+        await this.store.save(refreshed);
+        if (refreshGeneration !== this.generation) {
+          await this.store.delete();
+          throw new Error("Slack authentication changed while refreshing.");
+        }
+        this.credentials = refreshed;
+        this.loaded = true;
+        this.revisionValue++;
+      });
+      return refreshed;
+    } catch (error) {
+      if (refreshGeneration !== this.generation) {
+        throw new Error("Slack authentication changed while refreshing.");
       }
-    })().finally(() => {
-      this.refreshFlight = undefined;
+      if (terminal) {
+        const rotated = await this.invalidateUnlessRotated(current);
+        if (rotated) return rotated;
+      }
+      if (isSafeOAuthError(error)) throw error;
+      throw new Error(
+        terminal
+          ? "Slack credentials could not be refreshed and were removed."
+          : "Slack credentials could not be refreshed. Retry later.",
+      );
+    }
+  }
+
+  /** The token endpoint is pinned, so refreshes reuse metadata discovered earlier in this process. */
+  private async oauthMetadata(signal: AbortSignal): Promise<OAuthMetadata> {
+    this.metadata ??= await discoverOAuthMetadata(this.fetchImpl, signal);
+    return this.metadata;
+  }
+
+  private isExpiring(credentials: SlackCredentials): boolean {
+    return (
+      credentials.expiresAt !== undefined &&
+      credentials.expiresAt - this.now() <= this.config.refreshLeewayMs
+    );
+  }
+
+  /** Replaces the cached credentials with whatever another Pi process left in the store. */
+  private async adopt(stored: SlackCredentials | undefined): Promise<void> {
+    if (stored) {
+      try {
+        validateStoredCredentials(stored, await this.configForStoredCredentials(stored));
+      } catch {
+        await this.invalidate();
+        throw new Error("Stored Slack credentials failed security validation.");
+      }
+    }
+    await this.transitionLock.run(async () => {
+      this.credentials = stored;
+      this.loaded = true;
+      this.revisionValue++;
+      if (!stored) await this.onInvalidCredentials?.();
     });
-    return this.refreshFlight;
+  }
+
+  /** Removes credentials after a terminal refresh failure unless another process replaced them. */
+  private async invalidateUnlessRotated(
+    rejected: SlackCredentials,
+  ): Promise<SlackCredentials | undefined> {
+    const stored = await this.store.load();
+    if (stored?.refreshToken === rejected.refreshToken) {
+      await this.invalidate();
+      return undefined;
+    }
+    await this.adopt(stored);
+    return stored;
   }
 
   private async invalidate(): Promise<void> {
@@ -569,7 +643,10 @@ async function requestToken(
         "Slack rejected the public PKCE client. Verify that the app has PKCE enabled; do not add a client secret to this repository.",
       );
     }
-    throw new SlackTokenRejectedError("Slack rejected the OAuth token request.");
+    if (error !== undefined && TERMINAL_TOKEN_ERRORS.has(error)) {
+      throw new SlackTokenRejectedError("Slack rejected the OAuth token request.");
+    }
+    throw new Error("Slack's token endpoint returned a temporary error. Retry later.");
   }
 
   try {
@@ -1083,9 +1160,14 @@ function closeServer(server: Server | undefined): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-function combinedSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("Slack request was cancelled."));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 function openBrowser(url: URL): Promise<void> {

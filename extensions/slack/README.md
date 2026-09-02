@@ -78,7 +78,9 @@ when Slack content must not be retained in a Pi session. The extension has no se
 
 ## Reliability
 
-When Slack supplies a refresh token, the extension rotates credentials automatically before expiry. A transient metadata, network, rate-limit, or Slack service failure leaves the credentials intact so a later read can retry. OAuth rejection or a failed security validation still removes unusable credentials.
+When Slack supplies a refresh token, the extension rotates credentials automatically before expiry. A transient metadata, network, rate-limit, or Slack service failure leaves the credentials intact so a later read can retry; that includes service errors Slack reports as HTTP 200 with `ok: false`. Only a known terminal OAuth error such as `invalid_refresh_token` or `token_revoked`, or a failed security validation, removes unusable credentials.
+
+Several Pi processes (a second terminal, subagents) share the stored credentials, and Slack refresh tokens are single-use. A refresh therefore re-reads the store first and adopts tokens another process already rotated, and a process that loses a refresh race adopts the winner's tokens instead of deleting them.
 
 No OAuth client can guarantee permanent unattended access. `/slack-login` is still required if Slack omits a refresh token, the grant is revoked, workspace policy requires reauthorization, or SSO demands user interaction. The separately stored client ID makes that a direct browser login instead of another environment-variable setup.
 
@@ -89,5 +91,6 @@ No OAuth client can guarantee permanent unattended access. `/slack-login` is sti
 - **Scope validation failed:** the error lists the missing and unexpected effective scopes. Align the app's user scopes with the required set, revoke or reinstall a stale Slack grant if needed, then run `/slack-logout` and `/slack-login`. Repeated entries in Slack's response are harmless because they do not change the effective permission set.
 - **Authentication expires:** enable token rotation in the Slack app and run `/slack-login` again. If Slack still omits a refresh token, browser reauthorization cannot be automated safely.
 - **Temporary refresh failure:** retry the Slack read later; transient failures no longer delete credentials.
+- **Slack rejects the access token:** a token without a refresh token is kept after a rejected read. Retry; if it persists, run `/slack-logout` and `/slack-login`.
 - **Approved tool unavailable or incompatible:** run `/slack-discover`, compare the live schema with `tools.ts`, and review Slack's change before updating the contract.
 - **Credential store unavailable:** fix access to the OS keyring. The extension will not fall back to a file.
