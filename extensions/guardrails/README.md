@@ -26,6 +26,16 @@ Built-in policies:
 
 Read-only tools remain available if the configuration cannot be loaded. Side-effecting tools fail closed until a valid configuration is available; a failed reload keeps the last known-good configuration.
 
+## Shell parsing
+
+Shell commands go through a small structural parser, not a shell. Every command position is checked: after `;`, `&`, `&&`, `||`, `|`, newlines, parentheses, braces, `if`/`then`/`else`/`while`/`for`/`do`/`case` keywords, and inside function bodies.
+
+Benign wrappers are resolved transparently and the wrapped command is checked as if it ran directly: `builtin`, `caffeinate`, `chronic`, `command`, `doas`, `env`, `exec`, `ionice`, `nice`, `nohup`, `setsid`, `stdbuf`, `sudo`, `time`, `timeout`, `unbuffer`, and `xargs`.
+
+Literal nested command text is parsed recursively: `$(…)`, backticks, `<(…)`/`>(…)`, `eval`, `watch`, `env -S`, `sh`/`bash`/`zsh`/`dash`/`ksh`/`fish -c`, `find -exec`, and heredocs or here-strings fed to a shell or `eval`, directly or through `cat`/`tee` pipes. Heredocs fed to data-consuming commands such as `cat`, `tee`, `grep`, `sed`, `git`, and `jq` are treated as data.
+
+Anything else asks for confirmation rather than being allowed: a command name that depends on an expansion, `eval`/`-c` text containing expansions, a shell reading commands from a pipe, a heredoc fed to another interpreter or an unknown command, and unbalanced quotes or parentheses. Confirmation never overrides a deterministic block found elsewhere in the same command.
+
 ## Semantic review
 
 Semantic review is disabled by default and only runs for configured command prefixes and path patterns. It does not review ordinary reads, edits, writes, or shell commands.
@@ -88,7 +98,7 @@ Configuration lives under `guardrails` in `~/.pi/agent/settings.json`:
 
 Relative path patterns apply only inside the current working tree. Absolute and `~`-prefixed patterns are supported. `*` matches within one path segment; `**` spans directories. Paths are resolved through symlinks where possible.
 
-Semantic command entries are executable/argument prefixes. For example, `git push` reviews `git push origin main` but not `git status`; a bare `gh` reviews every `gh` invocation. Common wrappers such as `env`, `sudo`, and `command` are resolved.
+Semantic command entries are executable/argument prefixes. For example, `git push` reviews `git push origin main` but not `git status`; a bare `gh` reviews every `gh` invocation. Wrappers and nested command text are resolved as described in Shell parsing.
 
 Project-owned configuration is intentionally not loaded, so a checked-in repository cannot weaken personal guardrails.
 

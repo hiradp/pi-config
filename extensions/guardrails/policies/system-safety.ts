@@ -1,8 +1,8 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { parseShellSegments, shellSegmentInvocation } from "../command-parser.ts";
+import { parseShellCommand, shellSegmentInvocation, type ShellSegment } from "../command-parser.ts";
 import { actionMutationTargets, resolveInputPath, resolvePathForPolicy } from "../path-policy.ts";
-import { block, type GuardrailPolicy } from "../policy.ts";
+import { block, confirm, type GuardrailDecision, type GuardrailPolicy } from "../policy.ts";
 
 const home = homedir();
 const authorizedKeysPath = resolve(home, ".ssh/authorized_keys");
@@ -69,87 +69,94 @@ function systemOrSshPath(path: string): boolean {
   );
 }
 
-function shellSafetyReason(command: string, cwd: string): string | undefined {
-  for (const segment of parseShellSegments(command)) {
-    for (const word of segment.words) {
-      if (/^(NODE_TLS_REJECT_UNAUTHORIZED=0|GIT_SSL_NO_VERIFY=(1|true))$/i.test(word)) {
-        return "TLS verification weakening is hard-denied";
-      }
-      if (/sslverify=false/i.test(word)) return "TLS verification weakening is hard-denied";
+function segmentSafetyReason(segment: ShellSegment, cwd: string): string | undefined {
+  for (const word of segment.words) {
+    if (/^(NODE_TLS_REJECT_UNAUTHORIZED=0|GIT_SSL_NO_VERIFY=(1|true))$/i.test(word)) {
+      return "TLS verification weakening is hard-denied";
     }
+    if (/sslverify=false/i.test(word)) return "TLS verification weakening is hard-denied";
+  }
 
-    const invocation = shellSegmentInvocation(segment);
-    if (!invocation) continue;
-    const { command: name, args } = invocation;
-    const lowerArgs = args.map((argument) => argument.toLowerCase());
+  const invocation = shellSegmentInvocation(segment);
+  if (!invocation) return;
+  const { command: name, args } = invocation;
+  const lowerArgs = args.map((argument) => argument.toLowerCase());
 
-    if (
-      ["curl", "wget"].includes(name) &&
-      lowerArgs.some((argument) =>
-        ["--insecure", "-k", "--no-check-certificate"].includes(argument),
-      )
-    ) {
-      return "certificate verification weakening is hard-denied";
-    }
-    if (
-      ["npm", "pnpm", "yarn"].includes(name) &&
-      lowerArgs[0] === "config" &&
-      lowerArgs[1] === "set" &&
-      ["strict-ssl", "cafile"].includes(lowerArgs[2] ?? "") &&
-      ["false", "null"].includes(lowerArgs[3] ?? "")
-    ) {
-      return "package-manager TLS weakening is hard-denied";
-    }
-    if (
-      name === "git" &&
-      lowerArgs[0] === "config" &&
-      lowerArgs.some((argument) => argument === "sslverify" || argument.endsWith(".sslverify")) &&
-      lowerArgs.includes("false")
-    ) {
-      return "git TLS verification weakening is hard-denied";
-    }
-    if (name === "crontab" && !lowerArgs.includes("-l")) {
-      return "persistence mutation is hard-denied";
-    }
-    if (name === "launchctl" && ["load", "bootstrap", "enable"].includes(lowerArgs[0] ?? "")) {
-      return "persistence mutation is hard-denied";
-    }
-    if (name === "systemctl" && ["enable", "start"].includes(lowerArgs[0] ?? "")) {
-      return "persistence mutation is hard-denied";
-    }
-    if (name === "security" && lowerArgs[0] === "add-trusted-cert") {
-      return "platform security weakening is hard-denied";
-    }
-    if (name === "spctl" && lowerArgs.includes("--master-disable")) {
-      return "platform security weakening is hard-denied";
-    }
-    if (name === "csrutil" && lowerArgs[0] === "disable") {
-      return "platform security weakening is hard-denied";
-    }
+  if (
+    ["curl", "wget"].includes(name) &&
+    lowerArgs.some((argument) => ["--insecure", "-k", "--no-check-certificate"].includes(argument))
+  ) {
+    return "certificate verification weakening is hard-denied";
+  }
+  if (
+    ["npm", "pnpm", "yarn"].includes(name) &&
+    lowerArgs[0] === "config" &&
+    lowerArgs[1] === "set" &&
+    ["strict-ssl", "cafile"].includes(lowerArgs[2] ?? "") &&
+    ["false", "null"].includes(lowerArgs[3] ?? "")
+  ) {
+    return "package-manager TLS weakening is hard-denied";
+  }
+  if (
+    name === "git" &&
+    lowerArgs[0] === "config" &&
+    lowerArgs.some((argument) => argument === "sslverify" || argument.endsWith(".sslverify")) &&
+    lowerArgs.includes("false")
+  ) {
+    return "git TLS verification weakening is hard-denied";
+  }
+  if (name === "crontab" && !lowerArgs.includes("-l")) {
+    return "persistence mutation is hard-denied";
+  }
+  if (name === "launchctl" && ["load", "bootstrap", "enable"].includes(lowerArgs[0] ?? "")) {
+    return "persistence mutation is hard-denied";
+  }
+  if (name === "systemctl" && ["enable", "start"].includes(lowerArgs[0] ?? "")) {
+    return "persistence mutation is hard-denied";
+  }
+  if (name === "security" && lowerArgs[0] === "add-trusted-cert") {
+    return "platform security weakening is hard-denied";
+  }
+  if (name === "spctl" && lowerArgs.includes("--master-disable")) {
+    return "platform security weakening is hard-denied";
+  }
+  if (name === "csrutil" && lowerArgs[0] === "disable") {
+    return "platform security weakening is hard-denied";
+  }
 
-    if (name === "rm" && args.some(recursiveRmArgument)) {
-      for (const argument of args.filter((value) => !value.startsWith("-"))) {
-        const path = resolveInputPath(cwd, argument);
-        if (path && isRootHomeOrSystemPath(path)) {
-          return "irreversible deletion of home, root, or system paths is hard-denied";
-        }
+  if (name === "rm" && args.some(recursiveRmArgument)) {
+    for (const argument of args.filter((value) => !value.startsWith("-"))) {
+      const path = resolveInputPath(cwd, argument);
+      if (path && isRootHomeOrSystemPath(path)) {
+        return "irreversible deletion of home, root, or system paths is hard-denied";
       }
     }
-    if (name === "find" && lowerArgs.includes("-delete")) {
-      const path = resolveInputPath(
-        cwd,
-        args.find((argument) => !argument.startsWith("-")),
-      );
-      if (path && isRootHomeOrSystemPath(path)) return "system-wide delete is hard-denied";
-    }
-    if (["chmod", "chown"].includes(name)) {
-      for (const argument of args.filter((value) => !value.startsWith("-"))) {
-        const path = resolveInputPath(cwd, argument);
-        if (path && systemOrSshPath(path)) {
-          return "system or SSH permission mutation is hard-denied";
-        }
+  }
+  if (name === "find" && lowerArgs.includes("-delete")) {
+    const path = resolveInputPath(
+      cwd,
+      args.find((argument) => !argument.startsWith("-")),
+    );
+    if (path && isRootHomeOrSystemPath(path)) return "system-wide delete is hard-denied";
+  }
+  if (["chmod", "chown"].includes(name)) {
+    for (const argument of args.filter((value) => !value.startsWith("-"))) {
+      const path = resolveInputPath(cwd, argument);
+      if (path && systemOrSshPath(path)) {
+        return "system or SSH permission mutation is hard-denied";
       }
     }
+  }
+}
+
+function shellSafetyDecision(command: string, cwd: string): GuardrailDecision | undefined {
+  const parsed = parseShellCommand(command);
+  for (const segment of parsed.segments) {
+    const reason = segmentSafetyReason(segment, cwd);
+    if (reason) return block(reason);
+  }
+  if (parsed.unclassified.length > 0) {
+    return confirm(`Shell structure could not be classified: ${parsed.unclassified[0]}.`);
   }
 }
 
@@ -164,7 +171,6 @@ export const systemSafetyPolicy = {
       if (reason) return block(reason);
     }
     if (action.toolName !== "bash" || typeof action.input.command !== "string") return;
-    const reason = shellSafetyReason(action.input.command, cwd);
-    if (reason) return block(reason);
+    return shellSafetyDecision(action.input.command, cwd);
   },
 } satisfies GuardrailPolicy;
