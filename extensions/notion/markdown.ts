@@ -1,5 +1,12 @@
 import type { NotionBlock } from "./types.ts";
-import { asRecord, blockProperty, notionUrl, stringArray, stringValue } from "./utils.ts";
+import {
+  asRecord,
+  blockProperty,
+  notionUrl,
+  sanitizeDisplayText,
+  stringArray,
+  stringValue,
+} from "./utils.ts";
 
 const MAX_BLOCK_DEPTH = 5;
 
@@ -10,7 +17,7 @@ function annotationValue(annotation: unknown[]): unknown {
 export function richTextToMarkdown(value: unknown): string {
   if (!Array.isArray(value)) return "";
 
-  return value
+  const markdown = value
     .map((chunk) => {
       if (typeof chunk === "string") return chunk;
       if (!Array.isArray(chunk)) return "";
@@ -45,21 +52,28 @@ export function richTextToMarkdown(value: unknown): string {
       return result;
     })
     .join("");
+  return sanitizeDisplayText(markdown);
 }
 
 export function richTextToPlainText(value: unknown): string {
   if (!Array.isArray(value)) return "";
-  return value
+  const text = value
     .map((chunk) => {
       if (typeof chunk === "string") return chunk;
       if (!Array.isArray(chunk) || chunk[0] === undefined || chunk[0] === null) return "";
       return String(chunk[0]);
     })
     .join("");
+  return sanitizeDisplayText(text);
 }
 
 export function tableCell(value: unknown): string {
   return richTextToMarkdown(value).replaceAll("|", "\\|").replace(/\r?\n/g, " ");
+}
+
+function codeFence(code: string): string {
+  const longestRun = Math.max(2, ...[...code.matchAll(/`+/g)].map((run) => run[0].length));
+  return "`".repeat(longestRun + 1);
 }
 
 export function renderBlocks(
@@ -85,9 +99,11 @@ export function renderBlocks(
 
     if (type === "text") {
       if (text) lines.push(`${indent}${text}`, "");
+      if (children.length) lines.push(renderBlocks(children, blocks, depth + 1, `${indent}  `));
     } else if (type === "header" || type === "sub_header" || type === "sub_sub_header") {
       const level = type === "header" ? "#" : type === "sub_header" ? "##" : "###";
       lines.push(`${indent}${level} ${text}`, "");
+      if (children.length) lines.push(renderBlocks(children, blocks, depth + 1, indent));
     } else if (type === "bulleted_list") {
       lines.push(`${indent}- ${text}`);
       if (children.length) lines.push(renderBlocks(children, blocks, depth + 1, `${indent}  `));
@@ -105,10 +121,12 @@ export function renderBlocks(
       lines.push(`${indent}</details>`, "");
     } else if (type === "code") {
       const language = richTextToPlainText(blockProperty(block, "language")).toLowerCase();
+      const code = richTextToPlainText(blockProperty(block, "title"));
+      const fence = codeFence(code);
       lines.push(
-        `${indent}\`\`\`${language}`,
-        richTextToPlainText(blockProperty(block, "title")),
-        `${indent}\`\`\``,
+        `${indent}${fence}${language}`,
+        ...code.split("\n").map((line) => `${indent}${line}`),
+        `${indent}${fence}`,
         "",
       );
     } else if (type === "quote" || type === "callout") {
@@ -153,6 +171,12 @@ export function renderBlocks(
       const pointer = asRecord(format?.alias_pointer);
       const targetId = stringValue(pointer, "id");
       lines.push(`${indent}↗ ${targetId ? `[Linked page](${notionUrl(targetId)})` : text}`, "");
+    } else if (type === "transclusion_reference") {
+      // A synced block's children live on the original container it points at.
+      const pointer = asRecord(format?.transclusion_reference_pointer);
+      const source = blocks.get(stringValue(pointer, "id"));
+      if (source) lines.push(renderBlocks(stringArray(source.content), blocks, depth + 1, indent));
+      else lines.push(`${indent}*(synced block content unavailable)*`, "");
     } else if (type === "table") {
       let columns = stringArray(format?.table_block_column_order);
       if (!columns.length) {
