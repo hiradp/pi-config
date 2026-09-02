@@ -81,6 +81,8 @@ Add another section only when it contains relevant, non-routine information.
 
 If GitHub is unavailable or verification fails, preserve the local state, avoid repeated mutation attempts, and report what succeeded, what remains uncertain, and the exact safe next step.
 
+When an explicitly authorized publication was delegated, a worker may be unable to display a confirmation requested by the semantic guardrail. Treat that as an interaction-context blocker, not as a failed code review or evidence that `/review-code` is required. After verifying the worker's branch, commit, diff, checks, and clean state, resume the same push and PR creation from the interactive parent so the guardrail can request confirmation there. Do not bypass the guardrail, repeat the denied command in the worker, or change a required draft into a ready PR.
+
 ## Final response
 
 Report concisely:
