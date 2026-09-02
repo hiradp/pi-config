@@ -24,6 +24,8 @@ const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_PERSISTED_OUTPUT_BYTES = 50 * 1024 * 1024;
 const KILL_GRACE_MS = 5000;
 const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000;
+const NOT_ARMED_MESSAGE =
+  "Claude delegation is not armed. Each `/claude-tool on` allows exactly one claude invocation; ask the user to arm it again before retrying.";
 
 interface ClaudeParams {
   prompt: string;
@@ -354,7 +356,10 @@ export function hasFailedClaudeResult(details: unknown): boolean {
   );
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (
+  pi: ExtensionAPI,
+  runCommand: typeof runBoundedCommand = runBoundedCommand,
+) {
   let outputDirectory: Promise<string> | undefined;
   let persistedOutputBytes = 0;
 
@@ -456,6 +461,22 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const invocation = buildClaudeArgs(params);
+      // Check and consume the arming before the first await, so two calls in one
+      // assistant message cannot both run on a single `/claude-tool on`.
+      if (!isClaudeActive()) {
+        return {
+          content: [{ type: "text", text: NOT_ARMED_MESSAGE }],
+          details: {
+            model: invocation.model,
+            effort: invocation.effort,
+            exitCode: null,
+            killed: false,
+            failed: true,
+          } satisfies ClaudeDetails,
+        };
+      }
+      setClaudeActive(false);
+
       onUpdate?.({
         content: [
           {
@@ -471,7 +492,7 @@ export default function (pi: ExtensionAPI) {
         } satisfies ClaudeDetails,
       });
 
-      const result = await runBoundedCommand("claude", invocation.args, {
+      const result = await runCommand("claude", invocation.args, {
         cwd: ctx.cwd,
         signal,
         input: invocation.input,
