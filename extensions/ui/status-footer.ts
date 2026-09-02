@@ -27,6 +27,8 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 const CACHE_TTL_MS = 2000;
 const PR_CACHE_TTL_MS = 60_000;
 const PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+/** Tools that run a separate agent, whose usage is reported as agent cost rather than main. */
+const AGENT_TOOLS = new Set(["subagent", "claude"]);
 
 interface GitInfo {
   /** Display name for the folder part, e.g. "home/src" or "home⎇feat-x/src" */
@@ -355,13 +357,13 @@ export function sessionCosts(ctx: ExtensionContext): SessionCosts {
     if (entry.type === "message" && entry.message.role === "assistant") {
       main += entry.message.usage?.cost?.total ?? 0;
       if (
-        entry.message.content.some((part) => part.type === "toolCall" && part.name === "subagent")
+        entry.message.content.some((part) => part.type === "toolCall" && AGENT_TOOLS.has(part.name))
       ) {
         hasSubagents = true;
       }
     } else if (entry.type === "message" && entry.message.role === "toolResult") {
-      const cost = entry.message.usage?.cost.total ?? 0;
-      if (entry.message.toolName === "subagent") {
+      const cost = entry.message.usage?.cost?.total ?? 0;
+      if (AGENT_TOOLS.has(entry.message.toolName)) {
         hasSubagents = true;
         subagents += cost;
       } else {
