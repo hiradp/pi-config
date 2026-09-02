@@ -1,7 +1,12 @@
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { parseShellSegments, shellSegmentInvocation, type ShellSegment } from "./command-parser.ts";
+import {
+  parseShellSegments,
+  shellSegmentInvocation,
+  type CommandInvocation,
+  type ShellSegment,
+} from "./command-parser.ts";
 
 /** Commands whose non-option arguments are written or replaced in place. */
 const MUTATING_COMMANDS = new Set([
@@ -63,6 +68,8 @@ const GIT_WORKTREE_REWRITES = new Set([
 
 /** macOS and Windows volumes are case-insensitive by default, so path rules fold case there. */
 const CASE_INSENSITIVE_PATHS = process.platform === "darwin" || process.platform === "win32";
+
+const HEREDOC_REDIRECT = /<<(-?)\s*(?:'([^']*)'|"([^"]*)"|\\?([^\s'"<>|&;()]+))/g;
 
 export interface MutationTarget {
   path: string;
@@ -224,7 +231,7 @@ class DirectoryTracker {
     return this.current === undefined ? undefined : resolve(this.current, expanded);
   }
 
-  apply(invocation: { command: string; args: string[] }): void {
+  apply(invocation: CommandInvocation): void {
     const { command, args } = invocation;
     if (command !== "cd" && command !== "pushd" && command !== "popd") return;
     if (command === "popd") {
@@ -268,36 +275,13 @@ class MutationCollector implements MutationAnalysis {
   }
 }
 
-function subshellOpens(text: string): number {
-  return text.match(/^\(+/)?.[0].length ?? 0;
-}
-
-function subshellCloses(text: string): number {
-  return text.match(/\)+$/)?.[0].length ?? 0;
-}
-
-function stripGrouping(word: string): string {
-  return word.replace(/^\(+/, "").replace(/\)+$/, "");
-}
-
-function segmentInvocation(segment: ShellSegment): { command: string; args: string[] } | undefined {
-  const words = segment.words
-    .map(stripGrouping)
-    .filter((word) => word && word !== "{" && word !== "}");
-  const invocation = shellSegmentInvocation({ ...segment, words });
-  if (!invocation) return;
-  if (invocation.command === "builtin" && invocation.args.length > 0) {
-    return { command: basename(invocation.args[0]), args: invocation.args.slice(1) };
-  }
-  return invocation;
-}
-
 function optionValue(args: string[], index: number, names: string[]): string | undefined {
   const argument = args[index];
   for (const name of names) {
     if (argument === name) return args[index + 1];
-    if (name.startsWith("--") && argument.startsWith(`${name}=`))
+    if (name.startsWith("--") && argument.startsWith(`${name}=`)) {
       return argument.slice(name.length + 1);
+    }
     if (!name.startsWith("--") && argument.startsWith(name) && argument.length > name.length) {
       return argument.slice(name.length);
     }
@@ -452,7 +436,7 @@ function collectGitTargets(
 function collectInvocationTargets(
   collector: MutationCollector,
   tracker: DirectoryTracker,
-  invocation: { command: string; args: string[] },
+  invocation: CommandInvocation,
 ): void {
   const { command, args } = invocation;
   const base = tracker.current;
@@ -514,13 +498,6 @@ function collectInvocationTargets(
     if (extracting) collector.add(base, findOption(args, ["-C", "--directory"]) ?? ".", true);
     return;
   }
-  if (SHELL_COMMANDS.has(command)) {
-    const index = args.indexOf("-c");
-    if (index !== -1 && args[index + 1] !== undefined) {
-      collectShellMutations(collector, new DirectoryTracker(base), args[index + 1]);
-    }
-    return;
-  }
 
   const codeOptions = INLINE_CODE_OPTIONS[command];
   const remaining: string[] = [];
@@ -537,22 +514,129 @@ function collectInvocationTargets(
   }
 }
 
+/** Literal `-c` text of a shell invocation; it is re-parsed with its own directory scoping. */
+function shellCommandText(invocation: CommandInvocation): string | undefined {
+  if (!SHELL_COMMANDS.has(invocation.command)) return;
+  const index = invocation.args.findIndex((argument) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(argument));
+  const text = index === -1 ? undefined : invocation.args[index + 1];
+  return text !== undefined && !/[$`]/.test(text) ? text : undefined;
+}
+
+function collectSegment(
+  collector: MutationCollector,
+  tracker: DirectoryTracker,
+  segment: ShellSegment,
+  directoryPersists: boolean,
+): CommandInvocation | undefined {
+  for (const redirect of segment.redirectTargets) collector.add(tracker.current, redirect, false);
+  const invocation = shellSegmentInvocation(segment);
+  if (!invocation) return;
+  collectInvocationTargets(collector, tracker, invocation);
+  if (directoryPersists) tracker.apply(invocation);
+  return invocation;
+}
+
+/** Skip the heredoc bodies that follow a segment so they are not mistaken for shell structure. */
+function skipHeredocBodies(command: string, segment: ShellSegment, end: number): number {
+  let cursor = end;
+  for (const match of segment.text.matchAll(HEREDOC_REDIRECT)) {
+    const delimiter = match[2] ?? match[3] ?? match[4];
+    const stripTabs = match[1] === "-";
+    let lineStart = command.indexOf("\n", cursor);
+    if (lineStart === -1) return cursor;
+    lineStart++;
+    while (lineStart <= command.length) {
+      const newline = command.indexOf("\n", lineStart);
+      const lineEnd = newline === -1 ? command.length : newline;
+      let line = command.slice(lineStart, lineEnd);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) {
+        cursor = lineEnd;
+        break;
+      }
+      if (newline === -1) return cursor;
+      lineStart = newline + 1;
+    }
+  }
+  return cursor;
+}
+
+function withoutComments(gap: string): string {
+  return gap.replace(/#[^\n]*/g, "");
+}
+
+/** A single `|` or `&` after a segment runs it in a subshell, so its `cd` does not persist. */
+function runsInSubshell(gapAfter: string): boolean {
+  const gap = withoutComments(gapAfter);
+  return /(^|[^|])\|(?!\|)/.test(gap) || /(^|[^&;|])&(?!&)/.test(gap);
+}
+
+interface LocatedSegment {
+  segment: ShellSegment;
+  /** Offsets in the command for top-level segments; nested command text has none. */
+  start?: number;
+  after?: number;
+}
+
+/**
+ * Locate top-level segments in the command text. Segments the parser lifted out of nested text
+ * (substitutions, `-c` strings, heredoc bodies) are not found after the previous top-level
+ * segment, and heredoc bodies are skipped so their lines are not mistaken for top-level commands.
+ */
+function locateSegments(command: string, segments: ShellSegment[]): LocatedSegment[] {
+  const located: LocatedSegment[] = [];
+  let cursor = 0;
+  for (const segment of segments) {
+    const start = segment.text.length > 0 ? command.indexOf(segment.text, cursor) : -1;
+    if (start === -1) {
+      located.push({ segment });
+      continue;
+    }
+    const after = skipHeredocBodies(command, segment, start + segment.text.length);
+    located.push({ segment, start, after });
+    cursor = after;
+  }
+  return located;
+}
+
+/**
+ * Walk the parsed segments, following `cd`/`pushd`/`popd`. Parentheses only appear in the text
+ * between top-level segments, so subshell entry and exit are read from those gaps. Commands
+ * nested in substitutions, heredocs, or literal `-c` text run in their own scope.
+ */
 function collectShellMutations(
   collector: MutationCollector,
   tracker: DirectoryTracker,
   command: string,
 ): void {
-  for (const segment of parseShellSegments(command)) {
-    tracker.enter(subshellOpens(segment.text));
-    for (const redirect of segment.redirectTargets) {
-      collector.add(tracker.current, stripGrouping(redirect), false);
+  const located = locateSegments(command, parseShellSegments(command));
+  let gapFrom = 0;
+  let nested: DirectoryTracker | undefined;
+  let skipNested = false;
+
+  for (let index = 0; index < located.length; index++) {
+    const { segment, start, after } = located[index];
+    if (start === undefined || after === undefined) {
+      if (skipNested) continue;
+      nested ??= new DirectoryTracker(tracker.current);
+      collectSegment(collector, nested, segment, true);
+      continue;
     }
-    const invocation = segmentInvocation(segment);
-    if (invocation) {
-      collectInvocationTargets(collector, tracker, invocation);
-      tracker.apply(invocation);
+
+    nested = undefined;
+    for (const char of withoutComments(command.slice(gapFrom, start))) {
+      if (char === "(") tracker.enter(1);
+      else if (char === ")") tracker.exit(1);
     }
-    tracker.exit(subshellCloses(segment.text));
+    const next = located.slice(index + 1).find((entry) => entry.start !== undefined);
+    const gapAfter = command.slice(after, next?.start ?? command.length);
+    const invocation = collectSegment(collector, tracker, segment, !runsInSubshell(gapAfter));
+    const text = invocation && shellCommandText(invocation);
+    skipNested = text !== undefined;
+    if (text !== undefined) {
+      collectShellMutations(collector, new DirectoryTracker(tracker.current), text);
+    }
+    gapFrom = after;
   }
 }
 

@@ -92,10 +92,32 @@ describe("directory changes inside a command", () => {
       "cd src && echo x > notes.txt",
       "cd .git && echo x > /tmp/elsewhere.txt",
       "(cd .git && ls) && echo x > notes.txt",
+      "(cd .git; (cd hooks && ls)) && echo x > notes.txt",
       "pushd .git && popd && echo x > notes.txt",
       "cd src; cd ..; echo x > notes.txt",
+      'echo "$(cd .git && ls)" && echo x > notes.txt',
+      "bash -c 'cd .git && ls' && echo x > notes.txt",
+      "bash -c '(cd .git && ls) && echo x > notes.txt'",
+      "bash <<'EOF'\ncd .git\nls\nEOF\necho x > notes.txt",
+      "cd .git | cat; echo x > notes.txt",
+      "cd .git & echo x > notes.txt",
+      "echo start # (not a subshell\n(cd .git && ls); echo x > notes.txt",
     ]) {
       assert.equal(await outcome(pathsPolicy, bash(command)), "allow", command);
+    }
+  });
+
+  test("follows cd inside nested command text and compound bodies", async () => {
+    for (const command of [
+      'echo "$(cd .git && echo x > config)"',
+      "bash -c 'cd .git && echo x > config'",
+      "bash <<'EOF'\ncd .git\necho x > config\nEOF",
+      "find . -maxdepth 0 -exec sh -c 'cd .git && echo x > config' \\;",
+      "{ cd .git; echo x > config; }",
+      "if true; then cd .git; fi; echo x > config",
+      "echo start # (comment\ncd .git && echo x > config",
+    ]) {
+      assert.equal(await outcome(pathsPolicy, bash(command)), "block", command);
     }
   });
 
