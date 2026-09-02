@@ -1,6 +1,6 @@
 # Session review
 
-`/session-review [days]` reviews Pi sessions active in a trailing window and opens the result as a self-contained HTML file in the default browser. The window is the last `days` × 24 hours ending now, not calendar days; dates in the report are shown in local time. The default is seven days; `7d`, `14d`, and `30d` are accepted shortcuts. If the browser cannot be opened, the command reports the file path and falls back to the terminal view.
+`/session-review [days]` reviews Pi sessions active in a trailing window and opens the result as a self-contained HTML file in the default browser. The window is the last `days` × 24 hours ending now, not calendar days; dates in the report are shown in local time. The default is seven days; `7d`, `14d`, and `30d` are accepted shortcuts. If the browser cannot be opened, the command reports the file path and falls back to the terminal view. Each report is written to its own private temporary directory; writing a new report removes older ones, and any this Pi session created are removed when Pi exits.
 
 For each session it shows:
 

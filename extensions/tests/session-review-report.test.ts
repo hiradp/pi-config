@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import type { SessionEntry, SessionInfo, Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { renderHtmlReport } from "../session-review/html.ts";
+import { removeHtmlReports, renderHtmlReport, writeHtmlReport } from "../session-review/html.ts";
 import {
   createRepositoryLocator,
   discoverRepositories,
@@ -160,6 +160,27 @@ test("discovers one repository from duplicated tool paths", async (t) => {
   );
 
   assert.deepEqual(repositories, [{ name: basename(root), path: root }]);
+});
+
+test("removes every report directory this session created on shutdown", async (t) => {
+  const temp = await mkdtemp(join(tmpdir(), "session-review-test-"));
+  t.after(async () => {
+    await removeHtmlReports();
+    await rm(temp, { recursive: true, force: true });
+  });
+
+  const first = await writeHtmlReport(report(), temp);
+  const second = await writeHtmlReport(report({ generatedAt: report().generatedAt + 1_000 }), temp);
+
+  assert.notEqual(first, second);
+  await access(second);
+
+  await removeHtmlReports();
+  await assert.rejects(access(dirname(first)));
+  await assert.rejects(access(dirname(second)));
+
+  const third = await writeHtmlReport(report(), temp);
+  await access(third);
 });
 
 test("uses the same zero-outcome text and skipped-line notice in both views", () => {

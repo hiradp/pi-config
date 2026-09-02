@@ -1,7 +1,7 @@
 import { BorderedLoader, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { analyzeSessions } from "./analysis.ts";
 import { errorMessage } from "./format.ts";
-import { writeHtmlReport } from "./html.ts";
+import { removeHtmlReports, writeHtmlReport } from "./html.ts";
 import {
   loadClassificationConfig,
   loadSessionCorpus,
@@ -27,6 +27,8 @@ async function openHtmlReport(pi: ExtensionAPI, path: string): Promise<boolean> 
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.on("session_shutdown", () => removeHtmlReports());
+
   pi.registerCommand("session-review", {
     description: "Review recent Pi sessions, costs, outcomes, and work/personal classification",
     getArgumentCompletions: (prefix) => {

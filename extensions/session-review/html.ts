@@ -1,9 +1,8 @@
 import { lstat, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dateRange, formatReviewCost, sessionDate, successRate, titleCase } from "./format.ts";
 import type { SessionReviewReport } from "./types.ts";
-import { categoryStats, sanitizeDisplayText } from "./view.ts";
+import { categoryStats, formatReviewCost, sanitizeDisplayText } from "./view.ts";
 
 function escapeHtml(value: string): string {
   return sanitizeDisplayText(value)
@@ -12,6 +11,36 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function titleCase(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function dateRange(report: SessionReviewReport): string {
+  const format = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  return `${format.format(new Date(report.cutoff))} – ${format.format(new Date(report.generatedAt))}`;
+}
+
+function sessionDate(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function successRate(success: number, failure: number): string {
+  const decided = success + failure;
+  return decided === 0
+    ? "No decided outcomes"
+    : `${Math.round((success / decided) * 100)}% success`;
 }
 
 export function renderHtmlReport(report: SessionReviewReport): string {
@@ -57,9 +86,6 @@ export function renderHtmlReport(report: SessionReviewReport): string {
     report.analysisWarning,
     report.skippedFiles > 0
       ? `${report.skippedFiles} unreadable session files skipped.`
-      : undefined,
-    report.skippedLines > 0
-      ? `${report.skippedLines} unreadable session lines skipped.`
       : undefined,
     report.generationCost > 0
       ? `Report generation cost: ${formatReviewCost(report.generationCost)}.`
@@ -195,6 +221,9 @@ async function removeOlderHtmlReports(
   );
 }
 
+/** Directories created by this Pi session so shutdown can remove them all. */
+const createdDirectories = new Set<string>();
+
 export async function writeHtmlReport(
   report: SessionReviewReport,
   tempDirectory = tmpdir(),
@@ -209,6 +238,16 @@ export async function writeHtmlReport(
     throw error;
   }
 
+  createdDirectories.add(directory);
   await removeOlderHtmlReports(directory, tempDirectory).catch(() => {});
   return path;
+}
+
+/** Removes every report directory this Pi session created. */
+export async function removeHtmlReports(): Promise<void> {
+  const directories = [...createdDirectories];
+  createdDirectories.clear();
+  await Promise.all(
+    directories.map((directory) => rm(directory, { recursive: true, force: true }).catch(() => {})),
+  );
 }

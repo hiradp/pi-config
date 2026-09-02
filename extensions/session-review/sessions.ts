@@ -138,7 +138,9 @@ export interface ParsedSessionFile {
  */
 export function parseSessionFile(content: string): ParsedSessionFile | null {
   const lineCount = content.split("\n").filter((line) => line.trim()).length;
-  const parsed = parseSessionEntries(content);
+  const parsed = parseSessionEntries(content).filter(
+    (entry) => typeof entry === "object" && entry !== null,
+  );
   migrateSessionEntries(parsed);
   const [header, ...rest] = parsed;
   if (!header || header.type !== "session" || typeof header.id !== "string") return null;

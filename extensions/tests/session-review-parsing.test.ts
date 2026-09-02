@@ -63,6 +63,7 @@ test("skips a partial trailing line instead of dropping the session", () => {
 test("migrates version 1 session files that lack entry ids", () => {
   const lines = [
     header("legacy", AT),
+    "null",
     entryLine({ type: "message", timestamp: AT, message: userMessage(AT, "Fix the tests") }),
     entryLine({ type: "message", timestamp: AT, message: assistantMessage(AT, "Done.", 1.5) }),
   ];
@@ -70,7 +71,7 @@ test("migrates version 1 session files that lack entry ids", () => {
   const parsed = parseSessionFile(`${lines.join("\n")}\n`);
 
   assert.ok(parsed);
-  assert.equal(parsed.skippedLines, 0);
+  assert.equal(parsed.skippedLines, 1);
   assert.equal(parsed.entries.length, 2);
   const [first, second] = parsed.entries as SessionEntry[];
   assert.equal(typeof first?.id, "string");
