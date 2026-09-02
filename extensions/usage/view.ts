@@ -31,17 +31,36 @@ interface TableColumn {
   value: (totals: UsageTotals) => string;
 }
 
+/** Scales `tokens` by `unit`, choosing the decimals from the rounded value rather than the raw one. */
+function scaleTokens(tokens: number, unit: number, digitsFor: (value: number) => number): string {
+  const value = tokens / unit;
+  const rounded = Number(value.toFixed(digitsFor(value)));
+  return value.toFixed(digitsFor(rounded));
+}
+
 export function formatTokenCount(tokens: number): string {
-  if (tokens < 1_000) return Math.round(tokens).toString();
-  if (tokens < 1_000_000) {
-    const digits = tokens >= 100_000 ? 0 : 1;
-    return `${(tokens / 1_000).toFixed(digits)}k`;
-  }
-  if (tokens < 1_000_000_000) {
-    const digits = tokens >= 100_000_000 ? 0 : tokens >= 10_000_000 ? 1 : 2;
-    return `${(tokens / 1_000_000).toFixed(digits)}M`;
-  }
+  const rounded = Math.round(tokens);
+  if (rounded < 1_000) return rounded.toString();
+  // Rounding can carry a value into the next unit (999,999 would print as "1000k"), so each
+  // unit is only used when its rounded value still fits in it.
+  const thousands = scaleTokens(tokens, 1_000, (value) => (value >= 100 ? 0 : 1));
+  if (Number(thousands) < 1_000) return `${thousands}k`;
+  const millions = scaleTokens(tokens, 1_000_000, (value) =>
+    value >= 100 ? 0 : value >= 10 ? 1 : 2,
+  );
+  if (Number(millions) < 1_000) return `${millions}M`;
   return `${(tokens / 1_000_000_000).toFixed(2)}B`;
+}
+
+/** Session files carry provider, model, and tool names verbatim, so drop C0 and C1 controls. */
+function stripControls(text: string): string {
+  let clean = "";
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) continue;
+    clean += char;
+  }
+  return clean;
 }
 
 export function formatUsageCost(cost: number): string {
@@ -62,12 +81,11 @@ export function displayRows(period: PeriodUsage): DisplayUsageRow[] {
     const rows = period.models
       .filter((item) => item.category === category)
       .map((item): DisplayUsageRow => {
-        const identity = [item.provider, item.model].filter(Boolean).join(" / ");
-        const label = item.source
-          ? identity
-            ? `${item.source} · ${identity}`
-            : item.source
-          : identity;
+        const source = stripControls(item.source ?? "");
+        const identity = [stripControls(item.provider), stripControls(item.model)]
+          .filter(Boolean)
+          .join(" / ");
+        const label = source ? (identity ? `${source} · ${identity}` : source) : identity;
         return { label: `  ${label}`, totals: item, heading: false };
       });
 
