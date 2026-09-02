@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionReviewReport } from "./types.ts";
@@ -155,9 +155,86 @@ export function renderHtmlReport(report: SessionReviewReport): string {
 </html>\n`;
 }
 
-export async function writeHtmlReport(report: SessionReviewReport): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "pi-session-review-"));
-  const path = join(directory, "session-review.html");
-  await writeFile(path, renderHtmlReport(report), { encoding: "utf8", mode: 0o600 });
+const REPORT_DIRECTORY_PREFIX = "pi-session-review-";
+const REPORT_FILE_NAME = "session-review.html";
+
+async function reportModifiedAt(directory: string): Promise<number | undefined> {
+  try {
+    const directoryStats = await lstat(directory);
+    if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) return undefined;
+
+    const entries = await readdir(directory, { withFileTypes: true });
+    if (entries.length !== 1) return undefined;
+
+    const [reportEntry] = entries;
+    if (
+      reportEntry?.name !== REPORT_FILE_NAME ||
+      !reportEntry.isFile() ||
+      reportEntry.isSymbolicLink()
+    ) {
+      return undefined;
+    }
+
+    const reportStats = await lstat(join(directory, REPORT_FILE_NAME));
+    return reportStats.isFile() && !reportStats.isSymbolicLink() ? reportStats.mtimeMs : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function removeOlderHtmlReports(
+  currentDirectory: string,
+  tempDirectory: string,
+): Promise<void> {
+  const currentModifiedAt = await reportModifiedAt(currentDirectory);
+  if (currentModifiedAt === undefined) return;
+
+  let entries;
+  try {
+    entries = await readdir(tempDirectory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (
+        !entry.name.startsWith(REPORT_DIRECTORY_PREFIX) ||
+        !entry.isDirectory() ||
+        entry.isSymbolicLink()
+      ) {
+        return;
+      }
+
+      const directory = join(tempDirectory, entry.name);
+      if (directory === currentDirectory) return;
+
+      const modifiedAt = await reportModifiedAt(directory);
+      if (modifiedAt === undefined || modifiedAt >= currentModifiedAt) return;
+
+      try {
+        await rm(directory, { recursive: true });
+      } catch {
+        // Retention is best-effort; the report just created remains usable.
+      }
+    }),
+  );
+}
+
+export async function writeHtmlReport(
+  report: SessionReviewReport,
+  tempDirectory = tmpdir(),
+): Promise<string> {
+  const directory = await mkdtemp(join(tempDirectory, REPORT_DIRECTORY_PREFIX));
+  const path = join(directory, REPORT_FILE_NAME);
+
+  try {
+    await writeFile(path, renderHtmlReport(report), { encoding: "utf8", mode: 0o600 });
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+
+  await removeOlderHtmlReports(directory, tempDirectory).catch(() => {});
   return path;
 }

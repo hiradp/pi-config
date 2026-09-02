@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { SessionEntry, SessionInfo } from "@earendil-works/pi-coding-agent";
 import { parseAnalysisResponse } from "../session-review/analysis.ts";
-import { renderHtmlReport } from "../session-review/html.ts";
+import { renderHtmlReport, writeHtmlReport } from "../session-review/html.ts";
 import {
   attributeSessionCosts,
   isSessionEntry,
@@ -257,6 +260,55 @@ test("renders a self-contained escaped HTML report", () => {
   assert.doesNotMatch(html, /<script>alert/);
   assert.match(html, /Completed &amp; verified/);
   assert.match(html, /Report generation cost/);
+});
+
+test("retains only the newly generated extension-owned HTML report", async (t) => {
+  const tempDirectory = await mkdtemp(join(tmpdir(), "session-review-test-"));
+  t.after(() => rm(tempDirectory, { recursive: true, force: true }));
+
+  const oldDirectory = join(tempDirectory, "pi-session-review-old");
+  const unrelatedDirectory = join(tempDirectory, "other-tool-output");
+  const suspiciousDirectory = join(tempDirectory, "pi-session-review-suspicious");
+  const symlinkTarget = join(tempDirectory, "symlink-target");
+  await Promise.all([
+    mkdir(oldDirectory),
+    mkdir(unrelatedDirectory),
+    mkdir(suspiciousDirectory),
+    mkdir(symlinkTarget),
+  ]);
+  const oldReport = join(oldDirectory, "session-review.html");
+  await Promise.all([
+    writeFile(oldReport, "old report"),
+    writeFile(join(unrelatedDirectory, "data.txt"), "unrelated"),
+    writeFile(join(suspiciousDirectory, "session-review.html"), "suspicious"),
+    writeFile(join(suspiciousDirectory, "unexpected.txt"), "preserve me"),
+    writeFile(join(symlinkTarget, "session-review.html"), "linked report"),
+  ]);
+  await utimes(oldReport, new Date(0), new Date(0));
+
+  const reportSymlink = join(tempDirectory, "pi-session-review-linked");
+  await symlink(symlinkTarget, reportSymlink, "dir");
+  const matchingFile = join(tempDirectory, "pi-session-review-not-a-directory");
+  await writeFile(matchingFile, "preserve me");
+
+  const path = await writeHtmlReport(
+    {
+      generatedAt: new Date("2026-03-28T12:00:00Z").getTime(),
+      cutoff: new Date("2026-03-21T12:00:00Z").getTime(),
+      days: 7,
+      sessions: [],
+      generationCost: 0,
+      skippedFiles: 0,
+    },
+    tempDirectory,
+  );
+
+  assert.match(await readFile(path, "utf8"), /^<!doctype html>/);
+  await assert.rejects(stat(oldDirectory), { code: "ENOENT" });
+  assert.equal(await readFile(join(unrelatedDirectory, "data.txt"), "utf8"), "unrelated");
+  assert.equal(await readFile(join(suspiciousDirectory, "unexpected.txt"), "utf8"), "preserve me");
+  assert.equal(await readFile(join(reportSymlink, "session-review.html"), "utf8"), "linked report");
+  assert.equal(await readFile(matchingFile, "utf8"), "preserve me");
 });
 
 test("sorts reviewed sessions by descending cost", () => {
