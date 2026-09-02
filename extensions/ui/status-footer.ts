@@ -28,7 +28,6 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 const GIT_REFRESH_INTERVAL_MS = 2000;
 const GIT_TIMEOUT_MS = 3000;
 const UNTRACKED_LIMIT = 10_000;
-const PR_CACHE_TTL_MS = 60_000;
 const PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 /** Tools that run a separate agent, whose usage is reported as agent cost rather than main. */
 const AGENT_TOOLS = new Set(["subagent", "claude"]);
@@ -522,13 +521,8 @@ export function modelDisplayName(model: { id: string; name?: string } | undefine
 
 export default function (pi: ExtensionAPI) {
   let requestQuotaRefresh: (() => void) | undefined;
-  let requestPullRequestRefresh: (() => void) | undefined;
 
   pi.on("model_select", () => requestQuotaRefresh?.());
-  pi.on("agent_settled", () => {
-    requestQuotaRefresh?.();
-    requestPullRequestRefresh?.();
-  });
 
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
@@ -539,7 +533,6 @@ export default function (pi: ExtensionAPI) {
       let quotaRequest = 0;
       let pullRequestRequest = 0;
       let pullRequestBranch: string | null = null;
-      let pullRequestCheckedAt = 0;
       let disposed = false;
       const quotaAbort = new AbortController();
       const pullRequestAbort = new AbortController();
@@ -565,28 +558,18 @@ export default function (pi: ExtensionAPI) {
           });
       };
 
-      const refreshPullRequest = (force = false) => {
+      const refreshPullRequest = () => {
         const branch = footerData.getGitBranch();
-        const now = Date.now();
         if (!canLookupPullRequest(branch)) {
           pullRequest = null;
           pullRequestBranch = null;
-          pullRequestCheckedAt = now;
           tui.requestRender();
-          return;
-        }
-        if (
-          !force &&
-          pullRequestBranch === branch &&
-          now - pullRequestCheckedAt < PR_CACHE_TTL_MS
-        ) {
           return;
         }
 
         const request = ++pullRequestRequest;
         if (pullRequestBranch !== branch) pullRequest = null;
         pullRequestBranch = branch;
-        pullRequestCheckedAt = now;
         void loadPullRequest(pi, ctx.cwd, branch, pullRequestAbort.signal)
           .then((next) => {
             if (request === pullRequestRequest && footerData.getGitBranch() === branch) {
@@ -611,15 +594,14 @@ export default function (pi: ExtensionAPI) {
       });
       const unsubscribe = footerData.onBranchChange(() => {
         gitStatus.invalidate();
-        refreshPullRequest(true);
+        refreshPullRequest();
         tui.requestRender();
       });
       requestQuotaRefresh = refreshQuota;
-      requestPullRequestRefresh = refreshPullRequest;
       const quotaTimer = setInterval(refreshQuota, 5 * 60 * 1000);
-      const pullRequestTimer = setInterval(() => refreshPullRequest(true), PR_REFRESH_INTERVAL_MS);
+      const pullRequestTimer = setInterval(refreshPullRequest, PR_REFRESH_INTERVAL_MS);
       refreshQuota();
-      refreshPullRequest(true);
+      refreshPullRequest();
 
       return {
         dispose() {
@@ -631,9 +613,6 @@ export default function (pi: ExtensionAPI) {
           quotaAbort.abort();
           pullRequestAbort.abort();
           if (requestQuotaRefresh === refreshQuota) requestQuotaRefresh = undefined;
-          if (requestPullRequestRefresh === refreshPullRequest) {
-            requestPullRequestRefresh = undefined;
-          }
         },
         invalidate() {},
         render(width: number): string[] {
