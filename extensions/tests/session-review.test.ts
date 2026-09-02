@@ -310,6 +310,7 @@ test("retains only the newly generated extension-owned HTML report", async (t) =
       sessions: [],
       generationCost: 0,
       skippedFiles: 0,
+      skippedLines: 0,
     },
     tempDirectory,
   );
