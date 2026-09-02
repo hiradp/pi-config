@@ -841,55 +841,54 @@ export async function receiveAuthorizationCode(options: CallbackOptions): Promis
       options.signal.addEventListener("abort", onAbort, { once: true });
 
       server = createServer((request, response) => {
-        const rejectRequest = (status: number, message: string, browserMessage: string) => {
+        const respond = (status: number, browserMessage: string) => {
           response.writeHead(status, {
             "Cache-Control": "no-store",
             "Content-Type": "text/plain; charset=utf-8",
           });
           response.end(browserMessage);
-          finish(() => reject(new Error(message)));
         };
+        // Only a well-formed callback carrying this login's state may settle the flow; a restored
+        // browser tab or any other stray local request is answered and otherwise ignored.
         if (!isLoopbackAddress(request.socket.remoteAddress)) {
-          rejectRequest(403, "Slack OAuth callback was not received over loopback.", "Forbidden.");
+          respond(403, "Forbidden.");
           return;
         }
         if (
           request.method !== "GET" ||
           request.headers.host !== `${redirect.hostname}:${redirect.port}`
         ) {
-          rejectRequest(400, "Slack OAuth callback was malformed.", "Invalid OAuth callback.");
+          respond(400, "Invalid OAuth callback.");
           return;
         }
         let callback: URL;
         try {
           callback = new URL(request.url ?? "", SLACK_REDIRECT_URI);
         } catch {
-          rejectRequest(400, "Slack OAuth callback was malformed.", "Invalid OAuth callback.");
+          respond(400, "Invalid OAuth callback.");
           return;
         }
         if (callback.pathname !== redirect.pathname) {
-          rejectRequest(404, "Slack OAuth callback used an unexpected path.", "Not found.");
+          respond(404, "Not found.");
           return;
         }
         const state = callback.searchParams.get("state");
         if (!state || !safeEqual(state, options.expectedState)) {
-          rejectRequest(400, "Slack OAuth callback state did not match.", "Invalid OAuth state.");
+          respond(400, "Invalid OAuth state.");
           return;
         }
         if (callback.searchParams.has("error")) {
-          rejectRequest(400, "Slack authorization was denied.", "Slack authorization was denied.");
+          respond(400, "Slack authorization was denied.");
+          finish(() => reject(new Error("Slack authorization was denied.")));
           return;
         }
         const code = callback.searchParams.get("code");
         if (!code) {
-          rejectRequest(400, "Slack OAuth callback did not include a code.", "Missing OAuth code.");
+          respond(400, "Missing OAuth code.");
+          finish(() => reject(new Error("Slack OAuth callback did not include a code.")));
           return;
         }
-        response.writeHead(200, {
-          "Cache-Control": "no-store",
-          "Content-Type": "text/plain; charset=utf-8",
-        });
-        response.end("Slack authentication completed. You may close this tab.");
+        respond(200, "Slack authentication completed. You may close this tab.");
         finish(() => resolve(code));
       });
       server.once("error", () =>
@@ -898,13 +897,14 @@ export async function receiveAuthorizationCode(options: CallbackOptions): Promis
       server.listen(
         { host: redirect.hostname, port: Number(redirect.port), exclusive: true },
         () => {
+          if (settled) {
+            // The login was cancelled or timed out while binding; release the port now.
+            server?.close();
+            return;
+          }
           const address = server?.address();
           if (!address || typeof address === "string" || !isLoopbackAddress(address.address)) {
             finish(() => reject(new Error("Slack login could not bind a loopback address.")));
-            return;
-          }
-          if (options.signal.aborted) {
-            finish(() => reject(new Error("Slack login was cancelled.")));
             return;
           }
           options
@@ -1148,7 +1148,7 @@ function safeEqual(actual: string, expected: string): boolean {
   );
 }
 
-function isLoopbackAddress(address: string | undefined): boolean {
+export function isLoopbackAddress(address: string | undefined): boolean {
   if (!address) return false;
   if (address === "::1" || address === "127.0.0.1") return true;
   if (address.startsWith("::ffff:")) return address.slice(7) === "127.0.0.1";
@@ -1156,7 +1156,9 @@ function isLoopbackAddress(address: string | undefined): boolean {
 }
 
 function closeServer(server: Server | undefined): Promise<void> {
-  if (!server?.listening) return Promise.resolve();
+  if (!server) return Promise.resolve();
+  // Close even before listen() completes: a server that never ran only reports
+  // ERR_SERVER_NOT_RUNNING, and a bind that lands afterwards is closed by the listen callback.
   return new Promise((resolve) => server.close(() => resolve()));
 }
 

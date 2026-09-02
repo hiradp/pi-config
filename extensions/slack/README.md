@@ -51,7 +51,7 @@ The extension does not accept or store a client secret. Slack's OAuth metadata c
 
 ## Commands
 
-- `/slack-login` starts a browser-based PKCE flow. It works only in TUI mode while Pi is idle and refuses to replace existing credentials.
+- `/slack-login` starts a browser-based PKCE flow. It works only in TUI mode while Pi is idle and refuses to replace existing credentials. Only the Slack redirect carrying the login's state completes or aborts it; other requests to the callback port are answered and ignored.
 - `/slack-status` shows the verified team/user identity, expiration, and exact effective scopes without showing tokens.
 - `/slack-logout` closes the MCP session and removes OAuth credentials from the OS credential store. It retains the public client ID for future login and does **not** revoke the Slack grant or uninstall the app.
 - `/slack-discover` displays sanitized live MCP tool names, annotations, and input schemas for development review. It is a user command and is never available to the model.
