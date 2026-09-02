@@ -15,6 +15,7 @@ import {
   redactSessionText,
   repositoryCategoryOverride,
   safeToolArguments,
+  usageRecords,
 } from "../session-review/sessions.ts";
 import type { LoadedSession, PreparedSession, ReviewedSession } from "../session-review/types.ts";
 import { categoryStats, sanitizeDisplayText, sortSessionsByCost } from "../session-review/view.ts";
@@ -99,7 +100,12 @@ test("attributes copied usage to the earliest session", () => {
     ],
   };
 
-  const costs = attributeSessionCosts([clone, original]);
+  const costs = attributeSessionCosts(
+    [clone, original].map((session) => ({
+      info: session.info,
+      usage: usageRecords(session.entries),
+    })),
+  );
 
   assert.equal(costs.get(original.info.path), 1.5);
   assert.equal(costs.get(clone.info.path), 0.5);
@@ -168,6 +174,10 @@ test("redacts common credentials from session evidence", () => {
     redacted,
     /secret-value|basic-secret|key-secret|json-secret|aws-secret|dbuser:dbpass|flag-secret|user:pass|sk-abcdefghijklmnop|cookie-secret|set-cookie-secret|eyJabcdefghijk|private-material/,
   );
+  assert.equal(
+    redacted,
+    'API_TOKEN=<redacted> Authorization: <redacted> x-api-key: <redacted> {"token":"<redacted>","AWS_SECRET_ACCESS_KEY":"<redacted>"} DATABASE_URL=postgres://<redacted>@host/db curl --authorization <redacted> https://<redacted>@example.com <redacted-token>\nCookie: <redacted>\nSet-Cookie: <redacted>\n<redacted-jwt>\nPRIVATE_KEY="<redacted-private-key>"',
+  );
 });
 
 test("rejects malformed session entries before report processing", () => {
@@ -197,8 +207,8 @@ test("rejects malformed session entries before report processing", () => {
     id: "session",
     timestamp: new Date().toISOString(),
   });
-  assert.equal(parseSessionFile(`${header}\n{not-json}\n`), null);
-  assert.equal(
+  assert.deepEqual(parseSessionFile(`${header}\n{not-json}\n`), { entries: [], skippedLines: 1 });
+  assert.deepEqual(
     parseSessionFile(
       `${header}\n${JSON.stringify({
         type: "message",
@@ -208,7 +218,7 @@ test("rejects malformed session entries before report processing", () => {
         message: { role: "assistant", content: [null] },
       })}\n`,
     ),
-    null,
+    { entries: [], skippedLines: 1 },
   );
 });
 
@@ -253,6 +263,7 @@ test("renders a self-contained escaped HTML report", () => {
     sessions: [session],
     generationCost: 0.01,
     skippedFiles: 0,
+    skippedLines: 0,
   });
 
   assert.match(html, /^<!doctype html>/);
@@ -299,6 +310,7 @@ test("retains only the newly generated extension-owned HTML report", async (t) =
       sessions: [],
       generationCost: 0,
       skippedFiles: 0,
+      skippedLines: 0,
     },
     tempDirectory,
   );

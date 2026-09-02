@@ -1,5 +1,6 @@
 import { uuidv7, type Api, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { errorMessage } from "./format.ts";
 import { usageCost } from "./sessions.ts";
 import type {
   PreparedSession,
@@ -189,6 +190,45 @@ function requestPayload(sessions: readonly PreparedSession[]): string {
   );
 }
 
+interface AnalysisJob {
+  sessions: PreparedSession[];
+  maxTokens: number;
+  retries: number;
+}
+
+const MAX_TOKEN_RETRIES = 2;
+const CANCELLED_WARNING =
+  "Model analysis was cancelled; requests already dispatched may still be billed.";
+
+function batchMaxTokens(batch: readonly PreparedSession[], model: Model<Api>): number {
+  return Math.min(model.maxTokens, Math.max(1_500, batch.length * 650));
+}
+
+/**
+ * After a length-truncated response, halve the batch while keeping its token
+ * budget, or for a single session raise the budget; null when neither is possible.
+ */
+function retryAfterTruncation(job: AnalysisJob, model: Model<Api>): AnalysisJob[] | null {
+  if (job.sessions.length > 1) {
+    const half = Math.ceil(job.sessions.length / 2);
+    return [job.sessions.slice(0, half), job.sessions.slice(half)].map((sessions) => ({
+      ...job,
+      sessions,
+    }));
+  }
+  const maxTokens = Math.min(model.maxTokens, job.maxTokens * 2);
+  if (maxTokens <= job.maxTokens || job.retries >= MAX_TOKEN_RETRIES) return null;
+  return [{ ...job, maxTokens, retries: job.retries + 1 }];
+}
+
+function fallbackWarning(count: number, reason: string): string {
+  return `Model analysis fell back for ${count} ${count === 1 ? "session" : "sessions"}: ${reason}.`;
+}
+
+/**
+ * Never rejects on cancellation: the cost of every completed request is returned
+ * with fallback assessments for the sessions that were not analyzed.
+ */
 export async function analyzeSessions(
   sessions: readonly PreparedSession[],
   model: Model<Api>,
@@ -196,52 +236,81 @@ export async function analyzeSessions(
   signal?: AbortSignal,
 ): Promise<AnalysisResult> {
   const assessments: SessionAssessment[] = [];
+  const warnings: string[] = [];
   let generationCost = 0;
-  let warning: string | undefined;
-  const batches = batchSessions(sessions);
+  const queue: AnalysisJob[] = batchSessions(sessions).map((batch) => ({
+    sessions: batch,
+    maxTokens: batchMaxTokens(batch, model),
+    retries: 0,
+  }));
+  const abandon = (job: AnalysisJob, warning: string) => {
+    assessments.push(...[job, ...queue].flatMap((item) => item.sessions.map(fallbackAssessment)));
+    warnings.push(warning);
+    queue.length = 0;
+  };
 
-  for (let index = 0; index < batches.length; index++) {
-    const batch = batches[index]!;
-    signal?.throwIfAborted();
+  while (queue.length > 0) {
+    const job = queue.shift()!;
+    if (signal?.aborted) {
+      abandon(job, CANCELLED_WARNING);
+      break;
+    }
+    let response: AssistantMessage;
     try {
-      const response = await ctx.modelRegistry.complete(
+      response = await ctx.modelRegistry.complete(
         model,
         {
           systemPrompt: SYSTEM_PROMPT,
           messages: [
             {
               role: "user",
-              content: [{ type: "text", text: requestPayload(batch) }],
+              content: [{ type: "text", text: requestPayload(job.sessions) }],
               timestamp: Date.now(),
             },
           ],
         },
-        {
-          signal,
-          maxTokens: Math.min(model.maxTokens, Math.max(1_500, batch.length * 650)),
-          cacheRetention: "none",
-          sessionId: uuidv7(),
-        },
+        { signal, maxTokens: job.maxTokens, cacheRetention: "none", sessionId: uuidv7() },
       );
-      generationCost += usageCost(response.usage);
-      if (response.stopReason === "aborted" || signal?.aborted) {
-        const remaining = batches.slice(index).flat();
-        assessments.push(...remaining.map(fallbackAssessment));
-        warning = "Model analysis was cancelled; requests already dispatched may still be billed.";
-        break;
-      }
-      if (response.stopReason === "error") {
-        throw new Error(response.errorMessage ?? "review model request failed");
-      }
-      assessments.push(...parseAnalysisResponse(responseText(response), batch));
     } catch (error) {
-      if (signal?.aborted) throw error;
-      const remaining = batches.slice(index).flat();
-      assessments.push(...remaining.map(fallbackAssessment));
-      warning = `Model analysis stopped: ${error instanceof Error ? error.message : String(error)}`;
+      abandon(
+        job,
+        signal?.aborted ? CANCELLED_WARNING : `Model analysis stopped: ${errorMessage(error)}`,
+      );
       break;
+    }
+    generationCost += usageCost(response.usage);
+    if (response.stopReason === "aborted") {
+      abandon(job, CANCELLED_WARNING);
+      break;
+    }
+    if (response.stopReason === "error") {
+      abandon(
+        job,
+        `Model analysis stopped: ${response.errorMessage ?? "review model request failed"}`,
+      );
+      break;
+    }
+    if (response.stopReason === "length") {
+      const retry = retryAfterTruncation(job, model);
+      if (retry) {
+        queue.unshift(...retry);
+        continue;
+      }
+      assessments.push(...job.sessions.map(fallbackAssessment));
+      warnings.push(fallbackWarning(job.sessions.length, "the response was truncated"));
+      continue;
+    }
+    try {
+      assessments.push(...parseAnalysisResponse(responseText(response), job.sessions));
+    } catch (error) {
+      assessments.push(...job.sessions.map(fallbackAssessment));
+      warnings.push(fallbackWarning(job.sessions.length, errorMessage(error)));
     }
   }
 
-  return { assessments, generationCost, ...(warning ? { warning } : {}) };
+  return {
+    assessments,
+    generationCost,
+    ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
+  };
 }

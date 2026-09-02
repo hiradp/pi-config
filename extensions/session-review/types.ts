@@ -9,9 +9,30 @@ export interface RepositoryInfo {
   path: string;
 }
 
+export interface UsageRecord {
+  cost: number;
+  fingerprint: string;
+}
+
+export interface SessionUsage {
+  info: SessionInfo;
+  usage: UsageRecord[];
+}
+
 export interface LoadedSession {
   info: SessionInfo;
   entries: SessionEntry[];
+}
+
+export interface SessionCorpus {
+  /** Sessions active in the review window, newest first, with their entries. */
+  sessions: LoadedSession[];
+  /** Attributed cost by session path for every readable session. */
+  costs: Map<string, number>;
+  cutoff: number;
+  generatedAt: number;
+  skippedFiles: number;
+  skippedLines: number;
 }
 
 export interface PreparedSession {
@@ -49,6 +70,7 @@ export interface SessionReviewReport {
   generationCost: number;
   analysisWarning?: string;
   skippedFiles: number;
+  skippedLines: number;
 }
 
 export interface ClassificationConfig {
