@@ -8,3 +8,21 @@ updates:
       time: "09:00"
       timezone: UTC
     open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    groups:
+      pi:
+        patterns:
+          - "@earendil-works/*"
+      dev-tooling:
+        patterns:
+          - "@types/node"
+          - oxfmt
+          - oxlint
+          - typescript
