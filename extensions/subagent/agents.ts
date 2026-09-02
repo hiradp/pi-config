@@ -136,8 +136,11 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
   const agentMap = new Map<string, AgentConfig>();
 
   if (scope === "both") {
+    // A checked-out repository must not replace the user's own agent definitions.
     for (const agent of userAgents) agentMap.set(agent.name, agent);
-    for (const agent of projectAgents) agentMap.set(agent.name, agent);
+    for (const agent of projectAgents) {
+      if (!agentMap.has(agent.name)) agentMap.set(agent.name, agent);
+    }
   } else if (scope === "user") {
     for (const agent of userAgents) agentMap.set(agent.name, agent);
   } else {

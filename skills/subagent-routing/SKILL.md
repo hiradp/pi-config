@@ -23,7 +23,7 @@ Do not invent specialized names such as `explorer`, `investigator`, `implementat
 2. Use `plan-reviewer` only when the `/review-plan` template authorizes the invocation. Do not use it for routine plan creation or self-checking.
 3. Use `code-reviewer` only when the `/review-code` template authorizes the invocation. Every delegated reviewer task must begin with the literal line `Review authorization: /review-code`; never paraphrase it. Do not use it for routine post-change self-review.
 4. Default to `agentScope: "user"`. Use project agents only when the user explicitly requests them and their exact names have been discovered.
-5. Never set `confirmProjectAgents: false`. Preserve the confirmation for project-local agents.
+5. The tool runs a project-local agent only in a trusted project after the user confirms it in the UI, and a user agent always wins a name collision. Do not retry a refused project agent; report the refusal.
 6. Treat an unknown agent, `Unsupported task:`, failed, aborted, length-limited, or missing child result as a failed dispatch. Do not describe that scope as reviewed or completed.
 7. If a parallel invocation partially fails, use only the successful children's output and identify every scope that was not completed. Never infer findings or completion for a failed child.
 8. After a failed dispatch, use only an exact name listed by the tool. Never retry with another guessed name.

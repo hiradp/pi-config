@@ -6,6 +6,8 @@ It adds a `subagent` tool that can run user-defined agents in isolated Pi proces
 
 Children never receive the `subagent` or `claude` tools, and they carry a `PI_SUBAGENT_DEPTH` environment marker that makes the tool refuse nested dispatch, so delegation is at most one level deep.
 
+Project-local agents (`agentScope: "project"` or `"both"`) run only when Pi's project trust is active and the user confirms them in the UI; a headless session refuses them, and a project agent never replaces a user agent of the same name.
+
 While children are active, the tool renders a stable dashboard with queued/running/completed/failed states, each child's responsibility, latest action, elapsed time, turns, output tokens, cost, and model. Calls may provide a short `label`; otherwise the task text identifies the responsibility. Running labels use the same shimmer as Pi's working message without adding a dashboard timer, so they reuse the working row's existing repaints. Completed output stays collapsed until the tool-detail keybinding is used.
 
 ## Local agents

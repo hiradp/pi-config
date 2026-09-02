@@ -1230,12 +1230,6 @@ const SubagentParams = Type.Object({
     }),
   ),
   agentScope: Type.Optional(AgentScopeSchema),
-  confirmProjectAgents: Type.Optional(
-    Type.Boolean({
-      description: "Prompt before running project-local agents. Default: true.",
-      default: true,
-    }),
-  ),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for the agent process (single mode)" }),
   ),
@@ -1280,7 +1274,6 @@ export default function (
       };
       const discovery = discoverAgents(ctx.cwd, agentScope);
       const agents = discovery.agents;
-      const confirmProjectAgents = params.confirmProjectAgents ?? true;
       const runOptions: ChildRunOptions = {
         timeoutMs: params.timeoutMs ?? DEFAULT_CHILD_TIMEOUT_MS,
         registry,
@@ -1325,11 +1318,7 @@ export default function (
         };
       }
 
-      if (
-        (agentScope === "project" || agentScope === "both") &&
-        confirmProjectAgents &&
-        ctx.hasUI
-      ) {
+      if (agentScope === "project" || agentScope === "both") {
         const requestedAgentNames = new Set<string>();
         if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
         if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
@@ -1339,18 +1328,26 @@ export default function (
           .map((name) => agents.find((a) => a.name === name))
           .filter((a): a is AgentConfig => a?.source === "project");
 
+        // Project agents are repository-controlled, so they need both Pi's project
+        // trust and a person's confirmation; a headless session cannot supply the latter.
         if (projectAgentsRequested.length > 0) {
           const names = projectAgentsRequested.map((a) => a.name).join(", ");
           const dir = discovery.projectAgentsDir ?? "(unknown)";
+          if (!ctx.isProjectTrusted()) {
+            return refuse(
+              `Project-local agents (${names}) from ${dir} require a trusted project. Use user agents or ask the user to trust the project.`,
+            );
+          }
+          if (!ctx.hasUI) {
+            return refuse(
+              `Project-local agents (${names}) from ${dir} require an interactive confirmation, which this session cannot show. Use user agents instead.`,
+            );
+          }
           const ok = await ctx.ui.confirm(
             "Run project-local agents?",
             `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
           );
-          if (!ok)
-            return {
-              content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-              details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
-            };
+          if (!ok) return refuse("Canceled: project-local agents not approved.");
         }
       }
 
