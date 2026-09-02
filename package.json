@@ -7,7 +7,7 @@
     "check": "pnpm run \"/^check:.*/\"",
     "check:format": "oxfmt extensions --check",
     "check:lint": "oxlint extensions",
-    "check:test": "node --test extensions/guardrails/tests/*.test.ts extensions/tests/*.test.ts",
+    "check:test": "node --test --test-concurrency=1 extensions/guardrails/tests/*.test.ts extensions/tests/*.test.ts",
     "check:types": "tsc --noEmit",
     "format": "oxfmt extensions"
   },
