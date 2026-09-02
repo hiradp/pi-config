@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import {
   parseSessionEntries,
   SessionManager,
@@ -20,6 +20,10 @@ import {
   type UsageTrendKey,
 } from "./types.ts";
 
+/** Tools whose results carry the usage of a delegated agent rather than of this session. */
+const DELEGATED_TOOLS = new Set(["subagent", "claude"]);
+const COST_EPSILON = 1e-9;
+
 interface UsageEvent {
   timestamp: number;
   category: UsageCategory;
@@ -34,6 +38,12 @@ interface UsageEvent {
 interface UsageWindow {
   start: number;
   end: number;
+}
+
+interface AssistantIdentity {
+  provider: string;
+  requestedModel: string;
+  model: string;
 }
 
 interface MutablePeriodUsage {
@@ -84,6 +94,24 @@ export function addTotals(target: UsageTotals, source: UsageTotals): void {
   target.cost += source.cost;
 }
 
+/** Component-wise difference, or null when `part` exceeds `total` anywhere. */
+function subtractTotals(total: UsageTotals, part: UsageTotals): UsageTotals | null {
+  const remainder = {
+    input: total.input - part.input,
+    output: total.output - part.output,
+    cacheRead: total.cacheRead - part.cacheRead,
+    cacheWrite: total.cacheWrite - part.cacheWrite,
+    cost: total.cost - part.cost,
+  };
+  if (Object.values(remainder).some((value) => value < -COST_EPSILON)) return null;
+  remainder.cost = Math.max(0, remainder.cost);
+  return remainder;
+}
+
+function hasUsage(totals: UsageTotals): boolean {
+  return totalTokens(totals) > 0 || totals.cost > COST_EPSILON;
+}
+
 export function totalTokens(totals: UsageTotals): number {
   return totals.input + totals.output + totals.cacheRead + totals.cacheWrite;
 }
@@ -105,21 +133,15 @@ function fingerprint(parts: unknown[]): string {
   return createHash("sha256").update(JSON.stringify(parts)).digest("base64url");
 }
 
-function assistantEvent(
-  entry: SessionEntry,
-  message: Record<string, unknown>,
-  window: UsageWindow,
-  source?: string,
-): UsageEvent | null {
-  const usage = normalizeUsage(message.usage as Usage | undefined);
-  const messageTimestamp =
-    typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
-      ? message.timestamp
-      : undefined;
-  const timestamp = entryTimestamp(entry, messageTimestamp);
-  // Fingerprinting hashes the message content, so rule the event out by time before paying for it.
-  if (!usage || timestamp === null || !inWindow(timestamp, window)) return null;
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
 
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function assistantIdentity(message: Record<string, unknown>): AssistantIdentity {
   const provider =
     typeof message.provider === "string" && message.provider ? message.provider : "Unknown";
   const requestedModel =
@@ -128,16 +150,28 @@ function assistantEvent(
     typeof message.responseModel === "string" && message.responseModel
       ? message.responseModel
       : requestedModel;
+  return { provider, requestedModel, model };
+}
+
+function assistantEvent(
+  entry: SessionEntry,
+  message: Record<string, unknown>,
+  window: UsageWindow,
+): UsageEvent | null {
+  const usage = normalizeUsage(message.usage as Usage | undefined);
+  const timestamp = entryTimestamp(entry, finiteNumber(message.timestamp));
+  // Fingerprinting hashes the message content, so rule the event out by time before paying for it.
+  if (!usage || timestamp === null || !inWindow(timestamp, window)) return null;
+
+  const { provider, requestedModel, model } = assistantIdentity(message);
   return {
     timestamp,
-    category: source ? "delegated" : "primary",
+    category: "primary",
     provider,
     model,
-    ...(source ? { source } : {}),
     usage,
     fingerprint: fingerprint([
       "assistant",
-      source,
       entry.timestamp,
       message.timestamp,
       message.responseId,
@@ -150,21 +184,136 @@ function assistantEvent(
   };
 }
 
-function porterEvents(entry: SessionEntry, window: UsageWindow): UsageEvent[] {
-  if (entry.type !== "message" || entry.message.role !== "toolResult") return [];
-  if (entry.message.toolName !== "porter") return [];
+/** Assistant messages a subagent result stored for each child run. */
+function nestedAssistantMessages(details: unknown): Record<string, unknown>[] {
+  const results = asRecord(details)?.results;
+  if (!Array.isArray(results)) return [];
 
-  const details = entry.message.details;
-  if (typeof details !== "object" || details === null || !("messages" in details)) return [];
-  const messages = (details as { messages?: unknown }).messages;
-  if (!Array.isArray(messages)) return [];
-
-  return messages.flatMap((message) => {
-    if (typeof message !== "object" || message === null || !("role" in message)) return [];
-    if ((message as { role?: unknown }).role !== "assistant") return [];
-    const event = assistantEvent(entry, message as Record<string, unknown>, window, "Porter");
-    return event ? [event] : [];
+  return results.flatMap((result) => {
+    const messages = asRecord(result)?.messages;
+    if (!Array.isArray(messages)) return [];
+    return messages.flatMap((message) => {
+      const record = asRecord(message);
+      return record?.role === "assistant" ? [record] : [];
+    });
   });
+}
+
+/** The model a delegated tool reported: `claude` stores it directly, `subagent` per child run. */
+function detailsModel(details: unknown): string {
+  const record = asRecord(details);
+  if (typeof record?.model === "string") return record.model;
+
+  const results = Array.isArray(record?.results) ? record.results : [];
+  const models = new Set(
+    results.flatMap((result) => {
+      const model = asRecord(result)?.model;
+      return typeof model === "string" && model ? [model] : [];
+    }),
+  );
+  return models.size === 1 ? ([...models][0] ?? "") : "";
+}
+
+function delegatedEvents(
+  entry: SessionEntry,
+  message: ToolResultMessage,
+  timestamp: number,
+  total: UsageTotals,
+): UsageEvent[] {
+  const source = message.toolName;
+  const identity = [entry.timestamp, message.timestamp, message.toolCallId, source];
+  const events: UsageEvent[] = [];
+  const attributed = emptyTotals();
+
+  nestedAssistantMessages(message.details).forEach((nested, index) => {
+    const usage = normalizeUsage(nested.usage as Usage | undefined);
+    if (!usage) return;
+
+    const { provider, requestedModel, model } = assistantIdentity(nested);
+    addTotals(attributed, usage);
+    events.push({
+      timestamp,
+      category: "delegated",
+      provider,
+      model,
+      source,
+      usage,
+      fingerprint: fingerprint([
+        "delegated",
+        ...identity,
+        index,
+        nested.timestamp,
+        nested.responseId,
+        provider,
+        requestedModel,
+        nested.responseModel,
+        nested.usage,
+        nested.content,
+      ]),
+    });
+  });
+
+  // The result total also covers child work with no nested message, such as compaction or
+  // nested tool calls. That remainder goes to the one model that ran when there is one, and
+  // otherwise to the model the details name. Nested usage above the total means the details
+  // are inconsistent, so only the total is counted.
+  let remainder = subtractTotals(total, attributed);
+  if (remainder === null) {
+    events.length = 0;
+    remainder = total;
+  }
+  if (hasUsage(remainder)) {
+    const first = events[0];
+    const single =
+      first &&
+      events.every((event) => event.provider === first.provider && event.model === first.model)
+        ? first
+        : undefined;
+    events.push({
+      timestamp,
+      category: "delegated",
+      provider: single?.provider ?? "",
+      model: single?.model ?? detailsModel(message.details),
+      source,
+      usage: remainder,
+      fingerprint: fingerprint(["toolResult", ...identity, message.usage, message.content]),
+    });
+  }
+
+  return events;
+}
+
+function toolResultEvents(
+  entry: SessionEntry,
+  message: ToolResultMessage,
+  window: UsageWindow,
+): UsageEvent[] {
+  const usage = normalizeUsage(message.usage);
+  const timestamp = entryTimestamp(entry, message.timestamp);
+  if (!usage || timestamp === null || !inWindow(timestamp, window)) return [];
+  if (DELEGATED_TOOLS.has(message.toolName)) {
+    return delegatedEvents(entry, message, timestamp, usage);
+  }
+
+  return [
+    {
+      timestamp,
+      category: "tool",
+      provider: "",
+      model: "",
+      source: message.toolName || "unknown",
+      usage,
+      fingerprint: fingerprint([
+        "toolResult",
+        entry.timestamp,
+        message.timestamp,
+        message.toolCallId,
+        message.toolName,
+        message.usage,
+        message.content,
+      ]),
+    },
+  ];
 }
 
 function eventsFromEntry(entry: SessionEntry, window: UsageWindow): UsageEvent[] {
@@ -178,33 +327,7 @@ function eventsFromEntry(entry: SessionEntry, window: UsageWindow): UsageEvent[]
   }
 
   if (entry.type === "message" && entry.message.role === "toolResult") {
-    const nestedEvents = porterEvents(entry, window);
-    if (nestedEvents.length > 0) return nestedEvents;
-
-    const message = entry.message;
-    const usage = normalizeUsage(message.usage);
-    const timestamp = entryTimestamp(entry, message.timestamp);
-    if (!usage || timestamp === null || !inWindow(timestamp, window)) return [];
-
-    return [
-      {
-        timestamp,
-        category: "tool",
-        provider: "",
-        model: "",
-        source: message.toolName || "unknown",
-        usage,
-        fingerprint: fingerprint([
-          "toolResult",
-          entry.timestamp,
-          message.timestamp,
-          message.toolCallId,
-          message.toolName,
-          message.usage,
-          message.content,
-        ]),
-      },
-    ];
+    return toolResultEvents(entry, entry.message, window);
   }
 
   if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage) {
