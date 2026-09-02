@@ -36,7 +36,7 @@ const OUTCOME_STYLES: Record<TurnOutcome, { glyph: string; color: ThemeColor; ve
 /** The run's outcome is that of its final assistant message, so a retried error still counts as done. */
 function turnOutcome(stopReason: StopReason | null): TurnOutcome {
   if (stopReason === "aborted") return "aborted";
-  if (stopReason === "error") return "failed";
+  if (stopReason === "error" || stopReason === "length") return "failed";
   return "done";
 }
 

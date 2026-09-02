@@ -103,13 +103,22 @@ test("persists an aborted run as stopped in the warning colour", (t) => {
   assert.equal(render(data), `<warning>■</warning> <dim>Stopped after ${finishedAt(data)}</dim>`);
 });
 
-test("persists a failed run as failed in the error colour", (t) => {
+test("persists a failed run in the error colour", (t) => {
   const { run, render, assertTimerCleared } = setup(t);
 
   const data = run(["error"]);
 
   assert.equal(data.outcome, "failed");
   assertTimerCleared();
+  assert.equal(render(data), `<error>✗</error> <dim>Failed after ${finishedAt(data)}</dim>`);
+});
+
+test("persists a length-limited run as failed", (t) => {
+  const { run, render } = setup(t);
+
+  const data = run(["length"]);
+
+  assert.equal(data.outcome, "failed");
   assert.equal(render(data), `<error>✗</error> <dim>Failed after ${finishedAt(data)}</dim>`);
 });
 
