@@ -75,6 +75,11 @@ function formatUsageStats(usage: StoredUsageStats, model?: string): string {
   return parts.join(" ");
 }
 
+/** Child tool arguments are model-authored, so any of them may have the wrong type. */
+function stringArg(value: unknown, fallback: string): string {
+  return typeof value === "string" && value ? value : fallback;
+}
+
 function formatToolCall(
   toolName: string,
   args: Record<string, unknown>,
@@ -85,18 +90,18 @@ function formatToolCall(
     const home = os.homedir();
     return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
   };
+  const pathArg = (fallback: string) => stringArg(args.file_path, stringArg(args.path, fallback));
 
   switch (toolName) {
     case "bash": {
-      const command = singleLine((args.command as string) || "...");
+      const command = singleLine(stringArg(args.command, "..."));
       const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
       return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
     }
     case "read": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      const filePath = shortenPath(rawPath);
-      const offset = args.offset as number | undefined;
-      const limit = args.limit as number | undefined;
+      const filePath = shortenPath(pathArg("..."));
+      const offset = typeof args.offset === "number" ? args.offset : undefined;
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
       let text = themeFg("accent", filePath);
       if (offset !== undefined || limit !== undefined) {
         const startLine = offset ?? 1;
@@ -106,25 +111,21 @@ function formatToolCall(
       return themeFg("muted", "read ") + text;
     }
     case "write": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      const filePath = shortenPath(rawPath);
-      const content = (args.content || "") as string;
-      const lines = content.split("\n").length;
+      const filePath = shortenPath(pathArg("..."));
+      const lines = stringArg(args.content, "").split("\n").length;
       let text = themeFg("muted", "write ") + themeFg("accent", filePath);
       if (lines > 1) text += themeFg("dim", ` (${lines} lines)`);
       return text;
     }
     case "edit": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      return themeFg("muted", "edit ") + themeFg("accent", shortenPath(rawPath));
+      return themeFg("muted", "edit ") + themeFg("accent", shortenPath(pathArg("...")));
     }
     case "ls": {
-      const rawPath = (args.path || ".") as string;
-      return themeFg("muted", "ls ") + themeFg("accent", shortenPath(rawPath));
+      return themeFg("muted", "ls ") + themeFg("accent", shortenPath(stringArg(args.path, ".")));
     }
     case "find": {
-      const pattern = singleLine((args.pattern || "*") as string);
-      const rawPath = (args.path || ".") as string;
+      const pattern = singleLine(stringArg(args.pattern, "*"));
+      const rawPath = stringArg(args.path, ".");
       return (
         themeFg("muted", "find ") +
         themeFg("accent", pattern) +
@@ -132,8 +133,8 @@ function formatToolCall(
       );
     }
     case "grep": {
-      const pattern = singleLine((args.pattern || "") as string);
-      const rawPath = (args.path || ".") as string;
+      const pattern = singleLine(stringArg(args.pattern, ""));
+      const rawPath = stringArg(args.path, ".");
       return (
         themeFg("muted", "grep ") +
         themeFg("accent", `/${pattern}/`) +
@@ -417,7 +418,7 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
       for (const part of msg.content) {
         if (part.type === "text") items.push({ type: "text", text: part.text });
         else if (part.type === "toolCall")
-          items.push({ type: "toolCall", name: part.name, args: part.arguments });
+          items.push({ type: "toolCall", name: part.name, args: part.arguments ?? {} });
       }
     }
   }
@@ -493,6 +494,14 @@ function singleLine(text: string): string {
   return sanitizeDashboardText(text).replace(/\s+/g, " ").trim();
 }
 
+/** Sanitize model-authored task text line by line so expanded views keep its structure. */
+function sanitizeTaskText(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => sanitizeDashboardText(line).trimEnd())
+    .join("\n");
+}
+
 function modelName(model: string | undefined): string | undefined {
   const name = model?.split("/").filter(Boolean).at(-1);
   return name ? singleLine(name) : undefined;
@@ -536,7 +545,7 @@ function latestDisplayItem(messages: Message[]): DisplayItem | undefined {
       const part = message.content[partIndex];
       if (part.type === "text") return { type: "text", text: part.text };
       if (part.type === "toolCall") {
-        return { type: "toolCall", name: part.name, args: part.arguments };
+        return { type: "toolCall", name: part.name, args: part.arguments ?? {} };
       }
     }
   }
@@ -751,6 +760,8 @@ export interface ChildProcessOptions {
   maxStderrBytes?: number;
   /** Receives every JSON event line the child writes to stdout. */
   onEvent?: (event: any) => void;
+  /** Signals a process group; defaults to `signalProcessTree`. */
+  signalTree?: (pid: number, signal: NodeJS.Signals) => void;
 }
 
 export interface ChildProcessOutcome {
@@ -760,6 +771,8 @@ export interface ChildProcessOutcome {
   stderr: string;
   stderrTruncated: boolean;
   spawnError?: string;
+  /** Set when the child could not be signalled, for example because of EPERM. */
+  signalError?: string;
 }
 
 /** Keep at most the last `maxBytes` bytes of text, dropping any partial leading character. */
@@ -798,6 +811,7 @@ export function runChildProcess(
     let stderrTruncated = false;
     let aborted = false;
     let spawnError: string | undefined;
+    let signalError: string | undefined;
     let processClosed = false;
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
     let abortHandler: (() => void) | undefined;
@@ -805,9 +819,34 @@ export function runChildProcess(
     const finish = (code: number | null, closeSignal: NodeJS.Signals | null) => {
       if (processClosed) return;
       processClosed = true;
-      if (forceKillTimer && !aborted) clearTimeout(forceKillTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       if (options.signal && abortHandler) options.signal.removeEventListener("abort", abortHandler);
-      resolve({ code, signal: closeSignal, aborted, stderr, stderrTruncated, spawnError });
+      resolve({
+        code,
+        signal: closeSignal,
+        aborted,
+        stderr,
+        stderrTruncated,
+        spawnError,
+        signalError,
+      });
+    };
+
+    const sendSignal = (signal: NodeJS.Signals) => {
+      if (proc.pid === undefined || processClosed) return;
+      try {
+        (options.signalTree ?? signalProcessTree)(proc.pid, signal);
+      } catch (error) {
+        signalError = error instanceof Error ? error.message : String(error);
+      }
+    };
+
+    const terminate = () => {
+      sendSignal("SIGTERM");
+      if (!forceKillTimer) {
+        forceKillTimer = setTimeout(() => sendSignal("SIGKILL"), killGraceMs);
+        forceKillTimer.unref?.();
+      }
     };
 
     const appendStderr = (text: string) => {
@@ -856,10 +895,7 @@ export function runChildProcess(
       abortHandler = () => {
         if (aborted) return;
         aborted = true;
-        if (proc.pid === undefined) return;
-        signalProcessTree(proc.pid, "SIGTERM");
-        forceKillTimer = setTimeout(() => signalProcessTree(proc.pid!, "SIGKILL"), killGraceMs);
-        forceKillTimer.unref?.();
+        terminate();
       };
       if (options.signal.aborted) abortHandler();
       else options.signal.addEventListener("abort", abortHandler, { once: true });
@@ -1000,6 +1036,12 @@ async function runSingleAgent(
     currentResult.exitCode = status.exitCode;
     if (status.stopReason) currentResult.stopReason = status.stopReason;
     if (status.errorMessage) currentResult.errorMessage = status.errorMessage;
+    if (outcome.signalError) {
+      const note = `Failed to signal the subagent process group: ${outcome.signalError}`;
+      currentResult.errorMessage = currentResult.errorMessage
+        ? `${currentResult.errorMessage}; ${note}`
+        : note;
+    }
     currentResult.completedAt = Date.now();
     return currentResult;
   } finally {
@@ -1418,7 +1460,7 @@ export default function (pi: ExtensionAPI) {
         return new Text(text, 0, 0);
       }
       const agentName = args.agent || "...";
-      const responsibility = args.label || args.task;
+      const responsibility = singleLine(args.label || args.task || "");
       const preview = responsibility
         ? responsibility.length > 60
           ? `${responsibility.slice(0, 60)}...`
@@ -1470,7 +1512,7 @@ export default function (pi: ExtensionAPI) {
         addFailureDiagnostic(container, r, theme);
         container.addChild(new Spacer(1));
         container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
-        container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
+        container.addChild(new Text(theme.fg("dim", sanitizeTaskText(r.task)), 0, 0));
         container.addChild(new Spacer(1));
         container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
         if (displayItems.length === 0 && !finalOutput) {
@@ -1537,7 +1579,9 @@ export default function (pi: ExtensionAPI) {
               0,
             ),
           );
-          container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+          container.addChild(
+            new Text(theme.fg("muted", "Task: ") + theme.fg("dim", sanitizeTaskText(r.task)), 0, 0),
+          );
           if (resultStatus(r) === "queued") {
             container.addChild(new Text(theme.fg("dim", "(not run)"), 0, 0));
           } else {
@@ -1604,7 +1648,9 @@ export default function (pi: ExtensionAPI) {
           container.addChild(
             new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
           );
-          container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+          container.addChild(
+            new Text(theme.fg("muted", "Task: ") + theme.fg("dim", sanitizeTaskText(r.task)), 0, 0),
+          );
           addFailureDiagnostic(container, r, theme);
 
           // Show tool calls

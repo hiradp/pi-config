@@ -1,10 +1,55 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runChildProcess } from "../subagent/index.ts";
+import { runChildProcess, signalProcessTree } from "../subagent/index.ts";
 
 function runNode(script: string, options: Parameters<typeof runChildProcess>[2]) {
   return runChildProcess(process.execPath, ["-e", script], options);
 }
+
+const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+test(
+  "stops escalating once an aborted child exits and reports signal failures",
+  { skip: process.platform === "win32" },
+  async () => {
+    const sent: string[] = [];
+    const controller = new AbortController();
+    const pending = runNode("setInterval(() => {}, 1000)", {
+      cwd: process.cwd(),
+      signal: controller.signal,
+      killGraceMs: 50,
+      signalTree: (pid, signal) => {
+        sent.push(signal);
+        signalProcessTree(pid, signal);
+      },
+    });
+    await sleep(100);
+    controller.abort();
+    const outcome = await pending;
+    await sleep(150);
+
+    assert.equal(outcome.aborted, true);
+    assert.equal(outcome.signal, "SIGTERM");
+    assert.deepEqual(sent, ["SIGTERM"]);
+
+    const failing = new AbortController();
+    const unsignalled = runNode("setTimeout(() => {}, 300)", {
+      cwd: process.cwd(),
+      signal: failing.signal,
+      killGraceMs: 20,
+      signalTree: () => {
+        throw Object.assign(new Error("Operation not permitted"), { code: "EPERM" });
+      },
+    });
+    await sleep(50);
+    failing.abort();
+    const reported = await unsignalled;
+
+    assert.equal(reported.aborted, true);
+    assert.equal(reported.code, 0);
+    assert.match(reported.signalError ?? "", /Operation not permitted/);
+  },
+);
 
 test("decodes multibyte characters split across stdout chunks", async () => {
   const line = JSON.stringify({
