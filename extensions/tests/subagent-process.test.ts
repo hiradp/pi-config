@@ -163,6 +163,21 @@ test("decodes multibyte characters split across stdout chunks", async () => {
   assert.equal(events[0].message.content[0].text, "🙂 done");
 });
 
+test("counts stdout lines that are not JSON events instead of dropping them silently", async () => {
+  const events: any[] = [];
+  const outcome = await runNode(
+    'process.stdout.write(\'{"type":"one"}\\nnot json\\n{"type":"two"}\\n{"broken":\\n\\n\')',
+    { cwd: process.cwd(), onEvent: (event) => events.push(event) },
+  );
+
+  assert.equal(outcome.code, 0);
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["one", "two"],
+  );
+  assert.equal(outcome.droppedLines, 2);
+});
+
 test("keeps only the tail of oversized stderr", async () => {
   const outcome = await runNode(
     'process.stderr.write("é".repeat(60_000) + "\\n");process.stderr.write("tail marker\\n")',

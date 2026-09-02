@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Message, Usage } from "@earendil-works/pi-ai";
+import type { Message, TextContent, Usage } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
   CONFIG_DIR_NAME,
@@ -26,6 +26,7 @@ import {
   getAgentDir,
   getMarkdownTheme,
   keyText,
+  type SessionEntry,
   type Theme,
   withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
@@ -54,6 +55,93 @@ const DEFAULT_CHILD_TIMEOUT_MS = 45 * 60 * 1000;
 const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
 /** Delegation tools a child never receives, so a subagent cannot fan out further. */
 const CHILD_EXCLUDED_TOOLS = ["subagent", "claude"];
+/** Stop reasons that mark a child as failed; a completed child always ends with "stop". */
+const FAILURE_STOP_REASONS = new Set([
+  "error",
+  "aborted",
+  "length",
+  "timeout",
+  "incomplete",
+  "unsupported",
+]);
+
+export interface ReviewAuthorization {
+  command: string;
+  line: string;
+}
+
+/**
+ * Reviewer agents run only when the current user message carries the line their
+ * prompt template emits. The model cannot author a user message, so the template
+ * invocation itself is the gate.
+ */
+const REVIEW_AUTHORIZATIONS: Record<string, ReviewAuthorization> = {
+  "code-reviewer": { command: "/review-code", line: "Review authorization: /review-code" },
+  "plan-reviewer": { command: "/review-plan", line: "Review authorization: /review-plan" },
+};
+
+export function reviewAuthorization(agentName: string): ReviewAuthorization | undefined {
+  return Object.hasOwn(REVIEW_AUTHORIZATIONS, agentName)
+    ? REVIEW_AUTHORIZATIONS[agentName]
+    : undefined;
+}
+
+/** True when some line of `text`, once trimmed, is exactly the authorization line. */
+export function hasAuthorizationLine(text: string, line: string): boolean {
+  return text.split("\n").some((candidate) => candidate.trim() === line);
+}
+
+function latestUserMessage(entries: SessionEntry[]): { id: string; text: string } | undefined {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type !== "message" || entry.message.role !== "user") continue;
+    const { content } = entry.message;
+    const text =
+      typeof content === "string"
+        ? content
+        : content
+            .filter((part): part is TextContent => part.type === "text")
+            .map((part) => part.text)
+            .join("\n");
+    return { id: entry.id, text };
+  }
+  return undefined;
+}
+
+export class ReviewAuthorizationGate {
+  private readonly consumed = new Set<string>();
+
+  /**
+   * Returns a refusal when the dispatch names a reviewer without a usable
+   * authorization; otherwise consumes the current user message's authorization.
+   * Synchronous, so concurrent tool calls in one turn cannot share it.
+   */
+  authorize(
+    agentNames: Iterable<string>,
+    sessionManager: { getBranch(): SessionEntry[] },
+  ): string | undefined {
+    const required = new Map<string, ReviewAuthorization>();
+    for (const name of agentNames) {
+      const authorization = reviewAuthorization(name);
+      if (authorization) required.set(name, authorization);
+    }
+    if (required.size === 0) return undefined;
+
+    const latest = latestUserMessage(sessionManager.getBranch());
+    for (const [name, authorization] of required) {
+      if (!latest || !hasAuthorizationLine(latest.text, authorization.line)) {
+        return `Dispatching ${name} requires the current user message to contain the ${authorization.command} template's authorization line. Ask the user to run ${authorization.command}; do not retry without it.`;
+      }
+    }
+    const message = latest as { id: string; text: string };
+    if (this.consumed.has(message.id)) {
+      const commands = [...new Set([...required.values()].map((a) => a.command))].join(" or ");
+      return `The current user message already authorized one reviewer dispatch. Another pass requires a new ${commands} request from the user; do not retry.`;
+    }
+    this.consumed.add(message.id);
+    return undefined;
+  }
+}
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -248,6 +336,8 @@ interface SingleResult {
   stderr: string;
   /** Set when stderr exceeded its byte budget and only the tail was kept. */
   stderrTruncated?: boolean;
+  /** Stdout lines that were not JSON events; any drop fails the child. */
+  droppedLines?: number;
   usage: UsageStats;
   model?: string;
   stopReason?: string;
@@ -269,9 +359,7 @@ interface SubagentDetails {
 function isFailureState(exitCode: unknown, stopReason: unknown): boolean {
   return (
     (typeof exitCode === "number" && exitCode !== -1 && exitCode !== 0) ||
-    stopReason === "error" ||
-    stopReason === "aborted" ||
-    stopReason === "length"
+    (typeof stopReason === "string" && FAILURE_STOP_REASONS.has(stopReason))
   );
 }
 
@@ -350,6 +438,44 @@ function getFinalOutput(messages: Message[]): string {
     }
   }
   return "";
+}
+
+/**
+ * A child counts as completed only when it exited 0 and its final assistant
+ * message ended normally with text that is not a reviewer refusal. Returns the
+ * failure to record otherwise, or undefined when the result already carries one.
+ */
+export function classifyChildCompletion(
+  result: Pick<SingleResult, "exitCode" | "stopReason" | "messages" | "droppedLines">,
+): { stopReason: "incomplete" | "unsupported"; errorMessage: string } | undefined {
+  if (isFailureState(result.exitCode, result.stopReason)) return undefined;
+  if (result.droppedLines) {
+    const plural = result.droppedLines === 1 ? "" : "s";
+    return {
+      stopReason: "incomplete",
+      errorMessage: `Subagent wrote ${result.droppedLines} unparseable output line${plural}; its result may be incomplete`,
+    };
+  }
+  if (!result.messages.some((message) => message.role === "assistant")) {
+    return {
+      stopReason: "incomplete",
+      errorMessage: "Subagent exited without an assistant response",
+    };
+  }
+  if (result.stopReason !== "stop") {
+    return {
+      stopReason: "incomplete",
+      errorMessage: `Subagent ended with stop reason "${result.stopReason ?? "unknown"}" instead of a final response`,
+    };
+  }
+  const text = getFinalOutput(result.messages).trim();
+  if (!text) {
+    return { stopReason: "incomplete", errorMessage: "Subagent returned an empty final response" };
+  }
+  if (text.startsWith("Unsupported task:")) {
+    return { stopReason: "unsupported", errorMessage: text.split("\n", 1)[0].trim() };
+  }
+  return undefined;
 }
 
 export function resultStatus(result: SingleResult): SubagentStatus {
@@ -834,6 +960,8 @@ export interface ChildProcessOutcome {
   timedOut: boolean;
   stderr: string;
   stderrTruncated: boolean;
+  /** Non-empty stdout lines that did not parse as JSON events. */
+  droppedLines: number;
   spawnError?: string;
   /** Set when the child could not be signalled, for example because of EPERM. */
   signalError?: string;
@@ -873,6 +1001,7 @@ export function runChildProcess(
     let buffer = "";
     let stderr = "";
     let stderrTruncated = false;
+    let droppedLines = 0;
     let aborted = false;
     let timedOut = false;
     let spawnError: string | undefined;
@@ -900,6 +1029,7 @@ export function runChildProcess(
         timedOut,
         stderr,
         stderrTruncated,
+        droppedLines,
         spawnError,
         signalError,
       });
@@ -936,9 +1066,11 @@ export function runChildProcess(
       try {
         event = JSON.parse(line);
       } catch {
+        droppedLines++;
         return;
       }
       if (event && typeof event === "object") options.onEvent?.(event);
+      else droppedLines++;
     };
 
     proc.stdout.on("data", (data: Buffer) => {
@@ -986,9 +1118,12 @@ export function runChildProcess(
   });
 }
 
+type PiInvocation = (args: string[]) => { command: string; args: string[] };
+
 interface ChildRunOptions {
   timeoutMs: number;
   registry: ChildProcessRegistry;
+  invocation: PiInvocation;
 }
 
 /** CLI arguments for a child Pi, before the system prompt and task are appended. */
@@ -1103,7 +1238,7 @@ async function runSingleAgent(
     }
 
     args.push(`Task: ${task}`);
-    const invocation = getPiInvocation(args);
+    const invocation = runOptions.invocation(args);
     const outcome = await runChildProcess(invocation.command, invocation.args, {
       cwd: cwd ?? defaultCwd,
       env: childEnvironment(process.env),
@@ -1139,6 +1274,7 @@ async function runSingleAgent(
 
     currentResult.stderr = outcome.stderr;
     if (outcome.stderrTruncated) currentResult.stderrTruncated = true;
+    if (outcome.droppedLines > 0) currentResult.droppedLines = outcome.droppedLines;
     if (outcome.spawnError) {
       currentResult.errorMessage = `Failed to start subagent: ${outcome.spawnError}`;
     }
@@ -1156,6 +1292,11 @@ async function runSingleAgent(
       currentResult.errorMessage = currentResult.errorMessage
         ? `${currentResult.errorMessage}; ${note}`
         : note;
+    }
+    const completion = classifyChildCompletion(currentResult);
+    if (completion) {
+      currentResult.stopReason = completion.stopReason;
+      currentResult.errorMessage = completion.errorMessage;
     }
     currentResult.completedAt = Date.now();
     return currentResult;
@@ -1244,7 +1385,10 @@ const SubagentParams = Type.Object({
 export default function (
   pi: ExtensionAPI,
   registry: ChildProcessRegistry = new ChildProcessRegistry(),
+  invocation: PiInvocation = getPiInvocation,
 ) {
+  const authorizationGate = new ReviewAuthorizationGate();
+
   pi.on("session_shutdown", async () => {
     await registry.shutdown();
   });
@@ -1263,6 +1407,8 @@ export default function (
       "Single, parallel, and chain invocations may override the agent model.",
       `Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
       `To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
+      "code-reviewer and plan-reviewer run only under the /review-code or /review-plan template, once per user message.",
+      `Each child is killed after ${DEFAULT_CHILD_TIMEOUT_MS / 60000} minutes unless timeoutMs overrides it.`,
     ].join(" "),
     parameters: SubagentParams,
 
@@ -1277,6 +1423,7 @@ export default function (
       const runOptions: ChildRunOptions = {
         timeoutMs: params.timeoutMs ?? DEFAULT_CHILD_TIMEOUT_MS,
         registry,
+        invocation,
       };
 
       const hasChain = (params.chain?.length ?? 0) > 0;
@@ -1318,12 +1465,19 @@ export default function (
         };
       }
 
-      if (agentScope === "project" || agentScope === "both") {
-        const requestedAgentNames = new Set<string>();
-        if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
-        if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
-        if (params.agent) requestedAgentNames.add(params.agent);
+      const requestedAgentNames = new Set<string>();
+      if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
+      if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
+      if (params.agent) requestedAgentNames.add(params.agent);
 
+      // Consumed before the first await, so parallel tool calls cannot share one authorization.
+      const authorizationRefusal = authorizationGate.authorize(
+        requestedAgentNames,
+        ctx.sessionManager,
+      );
+      if (authorizationRefusal) return refuse(authorizationRefusal);
+
+      if (agentScope === "project" || agentScope === "both") {
         const projectAgentsRequested = Array.from(requestedAgentNames)
           .map((name) => agents.find((a) => a.name === name))
           .filter((a): a is AgentConfig => a?.source === "project");

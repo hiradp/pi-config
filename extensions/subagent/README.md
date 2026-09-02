@@ -4,6 +4,10 @@ This customized extension is based on Pi's official [subagent example](https://g
 
 It adds a `subagent` tool that can run user-defined agents in isolated Pi processes, either individually, in parallel, or as a chain. Each invocation may select a model; selection precedence is invocation, agent definition, then the dispatching session. Usage from child model calls is included in parent-session accounting, and any failed child marks the complete tool result as failed while preserving its diagnostics.
 
+A child counts as completed only when it exits 0 with a final `stop` response that has text and does not begin with `Unsupported task:`. Anything else, including unparseable output lines and the per-child wall-clock limit (45 minutes by default, `timeoutMs` to override), is reported as failed with a reason. On session shutdown every live child process group is terminated.
+
+Dispatching `code-reviewer` or `plan-reviewer` requires the current user message to contain the authorization line that `/review-code` or `/review-plan` emits, and each such message covers one `subagent` call. The model cannot write a user message, so running the template is the gate.
+
 Children never receive the `subagent` or `claude` tools, and they carry a `PI_SUBAGENT_DEPTH` environment marker that makes the tool refuse nested dispatch, so delegation is at most one level deep.
 
 Project-local agents (`agentScope: "project"` or `"both"`) run only when Pi's project trust is active and the user confirms them in the UI; a headless session refuses them, and a project agent never replaces a user agent of the same name.
@@ -18,4 +22,4 @@ While children are active, the tool renders a stable dashboard with queued/runni
 - `/review-plan` dispatches independent plan reviews to Sol and Kimi K3.
 - `/review-code` dispatches Sol for correctness/completeness and Kimi K3 for simplicity.
 
-Both prompt templates leave synthesis and changes in the original session. Re-run a pass after addressing accepted feedback until no confirmed findings remain.
+Both prompt templates leave synthesis and changes in the original session. Re-run the template after addressing accepted feedback until no confirmed findings remain; each run authorizes exactly one more pass.
