@@ -144,7 +144,9 @@ test("pipes child input, bounds output, and escalates cancellation", async () =>
       killGraceMs: 20,
     },
   );
-  setTimeout(() => controller.abort(), 100);
+  // Leave the child enough time to install its SIGTERM handler under a loaded test run,
+  // otherwise SIGTERM alone ends it and no escalation is observed.
+  setTimeout(() => controller.abort(), 500);
   const canceled = await pending;
 
   assert.equal(canceled.aborted, true);

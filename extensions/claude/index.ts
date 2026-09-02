@@ -23,6 +23,9 @@ const MAX_STDOUT_BYTES = 10 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_PERSISTED_OUTPUT_BYTES = 50 * 1024 * 1024;
 const KILL_GRACE_MS = 5000;
+const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000;
+const NOT_ARMED_MESSAGE =
+  "Claude delegation is not armed. Each `/claude-tool on` allows exactly one claude invocation; ask the user to arm it again before retrying.";
 
 interface ClaudeParams {
   prompt: string;
@@ -63,6 +66,7 @@ export interface BoundedCommandResult {
   signal: NodeJS.Signals | null;
   killed: boolean;
   aborted: boolean;
+  timedOut: boolean;
   stdoutOverflow: boolean;
   stderrTruncated: boolean;
   spawnError?: string;
@@ -75,6 +79,8 @@ interface RunCommandOptions {
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
   killGraceMs?: number;
+  /** Wall-clock limit; the child is terminated and `timedOut` set when it elapses. */
+  timeoutMs?: number;
 }
 
 function finiteNumber(value: unknown): number {
@@ -173,6 +179,7 @@ export async function runBoundedCommand(
       signal: null,
       killed: false,
       aborted: true,
+      timedOut: false,
       stdoutOverflow: false,
       stderrTruncated: false,
     };
@@ -181,6 +188,7 @@ export async function runBoundedCommand(
   const maxStdoutBytes = options.maxStdoutBytes ?? MAX_STDOUT_BYTES;
   const maxStderrBytes = options.maxStderrBytes ?? MAX_STDERR_BYTES;
   const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return new Promise((resolve) => {
     const child = spawn(command, args, {
@@ -199,6 +207,7 @@ export async function runBoundedCommand(
     let stdoutOverflow = false;
     let stderrTruncated = false;
     let aborted = false;
+    let timedOut = false;
     let killed = false;
     let closed = false;
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
@@ -210,6 +219,12 @@ export async function runBoundedCommand(
         if (!closed) child.kill("SIGKILL");
       }, killGraceMs);
     };
+
+    const timeoutTimer = setTimeout(() => {
+      if (closed) return;
+      timedOut = true;
+      terminate();
+    }, timeoutMs);
 
     const append = (
       chunks: Buffer[],
@@ -250,6 +265,7 @@ export async function runBoundedCommand(
       if (closed) return;
       closed = true;
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      clearTimeout(timeoutTimer);
       if (options.signal) options.signal.removeEventListener("abort", abortHandler);
       resolve({
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
@@ -258,6 +274,7 @@ export async function runBoundedCommand(
         signal: closeSignal,
         killed,
         aborted,
+        timedOut,
         stdoutOverflow,
         stderrTruncated,
         spawnError,
@@ -339,7 +356,10 @@ export function hasFailedClaudeResult(details: unknown): boolean {
   );
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (
+  pi: ExtensionAPI,
+  runCommand: typeof runBoundedCommand = runBoundedCommand,
+) {
   let outputDirectory: Promise<string> | undefined;
   let persistedOutputBytes = 0;
 
@@ -441,6 +461,22 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const invocation = buildClaudeArgs(params);
+      // Check and consume the arming before the first await, so two calls in one
+      // assistant message cannot both run on a single `/claude-tool on`.
+      if (!isClaudeActive()) {
+        return {
+          content: [{ type: "text", text: NOT_ARMED_MESSAGE }],
+          details: {
+            model: invocation.model,
+            effort: invocation.effort,
+            exitCode: null,
+            killed: false,
+            failed: true,
+          } satisfies ClaudeDetails,
+        };
+      }
+      setClaudeActive(false);
+
       onUpdate?.({
         content: [
           {
@@ -456,7 +492,7 @@ export default function (pi: ExtensionAPI) {
         } satisfies ClaudeDetails,
       });
 
-      const result = await runBoundedCommand("claude", invocation.args, {
+      const result = await runCommand("claude", invocation.args, {
         cwd: ctx.cwd,
         signal,
         input: invocation.input,
@@ -477,6 +513,8 @@ export default function (pi: ExtensionAPI) {
       else if (result.spawnError) failure = `Failed to start Claude Code: ${result.spawnError}`;
       else if (result.stdoutOverflow)
         failure = `Claude Code output exceeded ${formatSize(MAX_STDOUT_BYTES)}`;
+      else if (result.timedOut)
+        failure = `Claude Code timed out after ${Math.round(DEFAULT_TIMEOUT_MS / 60_000)} minutes`;
       else if (result.killed)
         failure = `Claude Code was killed${result.signal ? ` (${result.signal})` : ""}`;
       else if (result.code !== 0) failure = `Claude Code exited with code ${result.code}`;

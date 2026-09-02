@@ -12,19 +12,21 @@ Load and follow this skill before every `subagent` invocation.
 Only these user agents are configured:
 
 - `worker` — focused exploration, investigation, implementation, or other delegated work. State explicitly when its task must remain read-only.
-- `plan-reviewer` — only a review pass explicitly authorized by `/review-plan` and containing the complete plan, requirements, and repository context.
-- `code-reviewer` — only a code-review pass explicitly authorized by `/review-code` and containing the required `Review authorization:` and `Primary focus:` lines.
+- `plan-reviewer` — only a review pass under `/review-plan`, with the complete plan, requirements, and repository context in the task.
+- `code-reviewer` — only a code-review pass under `/review-code`, with the `Review authorization:` and `Primary focus:` lines in the task.
+
+The tool enforces both: it dispatches a reviewer only when the current user message carries the template's `Review authorization:` line, and each such message covers one `subagent` call.
 
 Do not invent specialized names such as `explorer`, `investigator`, `implementation-reviewer`, `security-reviewer`, or `footgun-reviewer`. Express the specialty in the task given to `worker`, or use the authorized review template.
 
 ## Routing rules
 
 1. Use `worker` for exploration, investigation, implementation, and focused delegated analysis.
-2. Use `plan-reviewer` only when the `/review-plan` template authorizes the invocation. Do not use it for routine plan creation or self-checking.
-3. Use `code-reviewer` only when the `/review-code` template authorizes the invocation. Every delegated reviewer task must begin with the literal line `Review authorization: /review-code`; never paraphrase it. Do not use it for routine post-change self-review.
+2. Use `plan-reviewer` only under `/review-plan`, never for routine plan creation or self-checking. A refused dispatch means the user has not run the template; ask for it instead of retrying.
+3. Use `code-reviewer` only under `/review-code`, never for routine post-change self-review. Every delegated reviewer task must begin with the literal line `Review authorization: /review-code`; never paraphrase it. The same refusal rule applies.
 4. Default to `agentScope: "user"`. Use project agents only when the user explicitly requests them and their exact names have been discovered.
-5. Never set `confirmProjectAgents: false`. Preserve the confirmation for project-local agents.
-6. Treat an unknown agent, `Unsupported task:`, failed, aborted, length-limited, or missing child result as a failed dispatch. Do not describe that scope as reviewed or completed.
+5. The tool runs a project-local agent only in a trusted project after the user confirms it in the UI, and a user agent always wins a name collision. Do not retry a refused project agent; report the refusal.
+6. The tool marks a child failed when it exits abnormally, times out, returns no final response, or answers `Unsupported task:`; an unknown agent name is a failed dispatch too. Do not describe that scope as reviewed or completed.
 7. If a parallel invocation partially fails, use only the successful children's output and identify every scope that was not completed. Never infer findings or completion for a failed child.
 8. After a failed dispatch, use only an exact name listed by the tool. Never retry with another guessed name.
 9. Do not claim `No confirmed findings`, successful review, or completed delegated work unless every required child returned usable output.

@@ -16,8 +16,9 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Message, Usage } from "@earendil-works/pi-ai";
+import type { Message, TextContent, Usage } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
   CONFIG_DIR_NAME,
@@ -25,6 +26,7 @@ import {
   getAgentDir,
   getMarkdownTheme,
   keyText,
+  type SessionEntry,
   type Theme,
   withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
@@ -47,6 +49,99 @@ const MAX_CONCURRENCY = 4;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 const MODEL_VISIBLE_OUTPUT_CAP = 50 * 1024;
 const MODEL_VISIBLE_OUTPUT_LINES = 2000;
+const KILL_GRACE_MS = 5000;
+const MAX_STDERR_BYTES = 64 * 1024;
+const DEFAULT_CHILD_TIMEOUT_MS = 45 * 60 * 1000;
+const SUBAGENT_DEPTH_ENV = "PI_SUBAGENT_DEPTH";
+/** Delegation tools a child never receives, so a subagent cannot fan out further. */
+const CHILD_EXCLUDED_TOOLS = ["subagent", "claude"];
+/** Stop reasons that mark a child as failed; a completed child always ends with "stop". */
+const FAILURE_STOP_REASONS = new Set([
+  "error",
+  "aborted",
+  "length",
+  "timeout",
+  "incomplete",
+  "unsupported",
+]);
+
+export interface ReviewAuthorization {
+  command: string;
+  line: string;
+}
+
+/**
+ * Reviewer agents run only when the current user message carries the line their
+ * prompt template emits. The model cannot author a user message, so the template
+ * invocation itself is the gate.
+ */
+const REVIEW_AUTHORIZATIONS: Record<string, ReviewAuthorization> = {
+  "code-reviewer": { command: "/review-code", line: "Review authorization: /review-code" },
+  "plan-reviewer": { command: "/review-plan", line: "Review authorization: /review-plan" },
+};
+
+export function reviewAuthorization(agentName: string): ReviewAuthorization | undefined {
+  return Object.hasOwn(REVIEW_AUTHORIZATIONS, agentName)
+    ? REVIEW_AUTHORIZATIONS[agentName]
+    : undefined;
+}
+
+/** True when some line of `text`, once trimmed, is exactly the authorization line. */
+export function hasAuthorizationLine(text: string, line: string): boolean {
+  return text.split("\n").some((candidate) => candidate.trim() === line);
+}
+
+function latestUserMessage(entries: SessionEntry[]): { id: string; text: string } | undefined {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type !== "message" || entry.message.role !== "user") continue;
+    const { content } = entry.message;
+    const text =
+      typeof content === "string"
+        ? content
+        : content
+            .filter((part): part is TextContent => part.type === "text")
+            .map((part) => part.text)
+            .join("\n");
+    return { id: entry.id, text };
+  }
+  return undefined;
+}
+
+export class ReviewAuthorizationGate {
+  private readonly consumed = new Set<string>();
+
+  /**
+   * Returns a refusal when the dispatch names a reviewer without a usable
+   * authorization; otherwise consumes the current user message's authorization.
+   * Synchronous, so concurrent tool calls in one turn cannot share it.
+   */
+  authorize(
+    agentNames: Iterable<string>,
+    sessionManager: { getBranch(): SessionEntry[] },
+  ): string | undefined {
+    const required = new Map<string, ReviewAuthorization>();
+    for (const name of agentNames) {
+      const authorization = reviewAuthorization(name);
+      if (authorization) required.set(name, authorization);
+    }
+    if (required.size === 0) return undefined;
+
+    const latest = latestUserMessage(sessionManager.getBranch());
+    for (const [name, authorization] of required) {
+      if (!latest || !hasAuthorizationLine(latest.text, authorization.line)) {
+        return `Dispatching ${name} requires the current user message to contain the ${authorization.command} template's authorization line. Ask the user to run ${authorization.command}; do not retry without it.`;
+      }
+    }
+    const message = latest as { id: string; text: string };
+    if (this.consumed.has(message.id)) {
+      const commands = [...new Set([...required.values()].map((a) => a.command))].join(" or ");
+      return `The current user message already authorized one reviewer dispatch. Another pass requires a new ${commands} request from the user; do not retry.`;
+    }
+    this.consumed.add(message.id);
+    return undefined;
+  }
+}
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -72,6 +167,11 @@ function formatUsageStats(usage: StoredUsageStats, model?: string): string {
   return parts.join(" ");
 }
 
+/** Child tool arguments are model-authored, so any of them may have the wrong type. */
+function stringArg(value: unknown, fallback: string): string {
+  return typeof value === "string" && value ? value : fallback;
+}
+
 function formatToolCall(
   toolName: string,
   args: Record<string, unknown>,
@@ -82,18 +182,18 @@ function formatToolCall(
     const home = os.homedir();
     return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
   };
+  const pathArg = (fallback: string) => stringArg(args.file_path, stringArg(args.path, fallback));
 
   switch (toolName) {
     case "bash": {
-      const command = singleLine((args.command as string) || "...");
+      const command = singleLine(stringArg(args.command, "..."));
       const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
       return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
     }
     case "read": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      const filePath = shortenPath(rawPath);
-      const offset = args.offset as number | undefined;
-      const limit = args.limit as number | undefined;
+      const filePath = shortenPath(pathArg("..."));
+      const offset = typeof args.offset === "number" ? args.offset : undefined;
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
       let text = themeFg("accent", filePath);
       if (offset !== undefined || limit !== undefined) {
         const startLine = offset ?? 1;
@@ -103,25 +203,21 @@ function formatToolCall(
       return themeFg("muted", "read ") + text;
     }
     case "write": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      const filePath = shortenPath(rawPath);
-      const content = (args.content || "") as string;
-      const lines = content.split("\n").length;
+      const filePath = shortenPath(pathArg("..."));
+      const lines = stringArg(args.content, "").split("\n").length;
       let text = themeFg("muted", "write ") + themeFg("accent", filePath);
       if (lines > 1) text += themeFg("dim", ` (${lines} lines)`);
       return text;
     }
     case "edit": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      return themeFg("muted", "edit ") + themeFg("accent", shortenPath(rawPath));
+      return themeFg("muted", "edit ") + themeFg("accent", shortenPath(pathArg("...")));
     }
     case "ls": {
-      const rawPath = (args.path || ".") as string;
-      return themeFg("muted", "ls ") + themeFg("accent", shortenPath(rawPath));
+      return themeFg("muted", "ls ") + themeFg("accent", shortenPath(stringArg(args.path, ".")));
     }
     case "find": {
-      const pattern = singleLine((args.pattern || "*") as string);
-      const rawPath = (args.path || ".") as string;
+      const pattern = singleLine(stringArg(args.pattern, "*"));
+      const rawPath = stringArg(args.path, ".");
       return (
         themeFg("muted", "find ") +
         themeFg("accent", pattern) +
@@ -129,8 +225,8 @@ function formatToolCall(
       );
     }
     case "grep": {
-      const pattern = singleLine((args.pattern || "") as string);
-      const rawPath = (args.path || ".") as string;
+      const pattern = singleLine(stringArg(args.pattern, ""));
+      const rawPath = stringArg(args.path, ".");
       return (
         themeFg("muted", "grep ") +
         themeFg("accent", `/${pattern}/`) +
@@ -238,6 +334,10 @@ interface SingleResult {
   exitCode: number;
   messages: Message[];
   stderr: string;
+  /** Set when stderr exceeded its byte budget and only the tail was kept. */
+  stderrTruncated?: boolean;
+  /** Stdout lines that were not JSON events; any drop fails the child. */
+  droppedLines?: number;
   usage: UsageStats;
   model?: string;
   stopReason?: string;
@@ -252,19 +352,20 @@ interface SubagentDetails {
   agentScope: AgentScope;
   projectAgentsDir: string | null;
   results: SingleResult[];
+  /** Set when the dispatch was refused before any child ran. */
+  failure?: string;
 }
 
 function isFailureState(exitCode: unknown, stopReason: unknown): boolean {
   return (
     (typeof exitCode === "number" && exitCode !== -1 && exitCode !== 0) ||
-    stopReason === "error" ||
-    stopReason === "aborted" ||
-    stopReason === "length"
+    (typeof stopReason === "string" && FAILURE_STOP_REASONS.has(stopReason))
   );
 }
 
 export function hasFailedSubagentResult(details: unknown): boolean {
   if (!details || typeof details !== "object") return false;
+  if (typeof (details as { failure?: unknown }).failure === "string") return true;
   const results = (details as { results?: unknown }).results;
   if (!Array.isArray(results)) return false;
 
@@ -279,7 +380,15 @@ export function classifyChildExit(
   code: number | null,
   signal: NodeJS.Signals | null,
   wasAborted: boolean,
-): { exitCode: number; stopReason?: "aborted"; errorMessage?: string } {
+  timeoutMs?: number,
+): { exitCode: number; stopReason?: "aborted" | "timeout"; errorMessage?: string } {
+  if (timeoutMs !== undefined) {
+    return {
+      exitCode: code || 1,
+      stopReason: "timeout",
+      errorMessage: `Subagent timed out after ${formatElapsed(timeoutMs)}${signal ? ` (${signal})` : ""}`,
+    };
+  }
   if (wasAborted) {
     return {
       exitCode: code ?? 1,
@@ -323,12 +432,51 @@ function getFinalOutput(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role === "assistant") {
-      for (const part of msg.content) {
-        if (part.type === "text") return part.text;
-      }
+      return msg.content
+        .filter((part): part is TextContent => part.type === "text")
+        .map((part) => part.text)
+        .join("");
     }
   }
   return "";
+}
+
+/**
+ * A child counts as completed only when it exited 0 and its final assistant
+ * message ended normally with text that is not a reviewer refusal. Returns the
+ * failure to record otherwise, or undefined when the result already carries one.
+ */
+export function classifyChildCompletion(
+  result: Pick<SingleResult, "exitCode" | "stopReason" | "messages" | "droppedLines">,
+): { stopReason: "incomplete" | "unsupported"; errorMessage: string } | undefined {
+  if (isFailureState(result.exitCode, result.stopReason)) return undefined;
+  if (result.droppedLines) {
+    const plural = result.droppedLines === 1 ? "" : "s";
+    return {
+      stopReason: "incomplete",
+      errorMessage: `Subagent wrote ${result.droppedLines} unparseable output line${plural}; its result may be incomplete`,
+    };
+  }
+  if (!result.messages.some((message) => message.role === "assistant")) {
+    return {
+      stopReason: "incomplete",
+      errorMessage: "Subagent exited without an assistant response",
+    };
+  }
+  if (result.stopReason !== "stop") {
+    return {
+      stopReason: "incomplete",
+      errorMessage: `Subagent ended with stop reason "${result.stopReason ?? "unknown"}" instead of a final response`,
+    };
+  }
+  const text = getFinalOutput(result.messages).trim();
+  if (!text) {
+    return { stopReason: "incomplete", errorMessage: "Subagent returned an empty final response" };
+  }
+  if (text.startsWith("Unsupported task:")) {
+    return { stopReason: "unsupported", errorMessage: text.split("\n", 1)[0].trim() };
+  }
+  return undefined;
 }
 
 export function resultStatus(result: SingleResult): SubagentStatus {
@@ -360,6 +508,14 @@ function getResultOutput(result: SingleResult): string {
   return getFinalOutput(result.messages) || "(no output)";
 }
 
+/**
+ * Fill every `{previous}` placeholder with the prior step's output. A replacer
+ * function keeps `$&`, `$'`, and similar sequences in that output literal.
+ */
+export function substitutePrevious(task: string, previous: string): string {
+  return task.replace(/\{previous\}/g, () => previous);
+}
+
 export function truncateOutput(
   output: string,
   maxBytes = MODEL_VISIBLE_OUTPUT_CAP,
@@ -386,7 +542,7 @@ export function truncateOutput(
     ]
       .filter(Boolean)
       .join(" and ");
-    result = `${truncated}\n\n[Output truncated: ${omitted} omitted. Full output preserved in tool details.]`;
+    result = `${truncated}\n\n[Output truncated: ${omitted} omitted.]`;
     if (Buffer.byteLength(result, "utf8") > maxBytes) truncated = truncated.slice(0, -1);
   } while (Buffer.byteLength(result, "utf8") > maxBytes);
 
@@ -404,7 +560,7 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
       for (const part of msg.content) {
         if (part.type === "text") items.push({ type: "text", text: part.text });
         else if (part.type === "toolCall")
-          items.push({ type: "toolCall", name: part.name, args: part.arguments });
+          items.push({ type: "toolCall", name: part.name, args: part.arguments ?? {} });
       }
     }
   }
@@ -480,6 +636,14 @@ function singleLine(text: string): string {
   return sanitizeDashboardText(text).replace(/\s+/g, " ").trim();
 }
 
+/** Sanitize model-authored task text line by line so expanded views keep its structure. */
+function sanitizeTaskText(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => sanitizeDashboardText(line).trimEnd())
+    .join("\n");
+}
+
 function modelName(model: string | undefined): string | undefined {
   const name = model?.split("/").filter(Boolean).at(-1);
   return name ? singleLine(name) : undefined;
@@ -523,7 +687,7 @@ function latestDisplayItem(messages: Message[]): DisplayItem | undefined {
       const part = message.content[partIndex];
       if (part.type === "text") return { type: "text", text: part.text };
       if (part.type === "toolCall") {
-        return { type: "toolCall", name: part.name, args: part.arguments };
+        return { type: "toolCall", name: part.name, args: part.arguments ?? {} };
       }
     }
   }
@@ -730,6 +894,262 @@ export function resolveDispatchConfig(
   };
 }
 
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref?.();
+  });
+}
+
+function trySignalTree(pid: number, signal: NodeJS.Signals): void {
+  try {
+    signalProcessTree(pid, signal);
+  } catch {
+    // The group is already gone or belongs to someone else; nothing left to reap.
+  }
+}
+
+/** Live child process groups, so a session shutdown can reap them. */
+export class ChildProcessRegistry {
+  private readonly children = new Map<number, Promise<void>>();
+  private readonly graceMs: number;
+
+  constructor(graceMs = KILL_GRACE_MS) {
+    this.graceMs = graceMs;
+  }
+
+  add(pid: number, closed: Promise<void>): void {
+    this.children.set(pid, closed);
+    void closed.then(() => this.children.delete(pid));
+  }
+
+  get size(): number {
+    return this.children.size;
+  }
+
+  /** SIGTERM every live group, then SIGKILL whatever is still running after the grace period. */
+  async shutdown(graceMs = this.graceMs): Promise<void> {
+    const pending = [...this.children.entries()];
+    if (pending.length === 0) return;
+    const closed = Promise.all(pending.map(([, promise]) => promise)).then(() => undefined);
+    for (const [pid] of pending) trySignalTree(pid, "SIGTERM");
+    await Promise.race([closed, sleep(graceMs)]);
+    for (const [pid] of pending) if (this.children.has(pid)) trySignalTree(pid, "SIGKILL");
+    await Promise.race([closed, sleep(graceMs)]);
+  }
+}
+
+export interface ChildProcessOptions {
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  /** Wall-clock limit; the group is terminated and the outcome marked `timedOut` when it elapses. */
+  timeoutMs?: number;
+  killGraceMs?: number;
+  maxStderrBytes?: number;
+  registry?: ChildProcessRegistry;
+  /** Receives every JSON event line the child writes to stdout. */
+  onEvent?: (event: any) => void;
+  /** Signals a process group; defaults to `signalProcessTree`. */
+  signalTree?: (pid: number, signal: NodeJS.Signals) => void;
+}
+
+export interface ChildProcessOutcome {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  aborted: boolean;
+  timedOut: boolean;
+  stderr: string;
+  stderrTruncated: boolean;
+  /** Non-empty stdout lines that did not parse as JSON events. */
+  droppedLines: number;
+  spawnError?: string;
+  /** Set when the child could not be signalled, for example because of EPERM. */
+  signalError?: string;
+}
+
+/** Keep at most the last `maxBytes` bytes of text, dropping any partial leading character. */
+export function tailBytes(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  return bytes
+    .subarray(bytes.length - maxBytes)
+    .toString("utf8")
+    .replace(/^�+/, "");
+}
+
+/**
+ * Spawn a JSON-mode child in its own process group, feed each stdout line to
+ * `onEvent`, and resolve once the process closes.
+ */
+export function runChildProcess(
+  command: string,
+  args: string[],
+  options: ChildProcessOptions,
+): Promise<ChildProcessOutcome> {
+  return new Promise((resolve) => {
+    const proc = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      detached: process.platform !== "win32",
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
+    const maxStderrBytes = options.maxStderrBytes ?? MAX_STDERR_BYTES;
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    let buffer = "";
+    let stderr = "";
+    let stderrTruncated = false;
+    let droppedLines = 0;
+    let aborted = false;
+    let timedOut = false;
+    let spawnError: string | undefined;
+    let signalError: string | undefined;
+    let processClosed = false;
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let abortHandler: (() => void) | undefined;
+    let markClosed: () => void = () => {};
+    const closed = new Promise<void>((resolveClosed) => {
+      markClosed = resolveClosed;
+    });
+
+    const finish = (code: number | null, closeSignal: NodeJS.Signals | null) => {
+      if (processClosed) return;
+      processClosed = true;
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (options.signal && abortHandler) options.signal.removeEventListener("abort", abortHandler);
+      markClosed();
+      resolve({
+        code,
+        signal: closeSignal,
+        aborted,
+        timedOut,
+        stderr,
+        stderrTruncated,
+        droppedLines,
+        spawnError,
+        signalError,
+      });
+    };
+
+    const sendSignal = (signal: NodeJS.Signals) => {
+      if (proc.pid === undefined || processClosed) return;
+      try {
+        (options.signalTree ?? signalProcessTree)(proc.pid, signal);
+      } catch (error) {
+        signalError = error instanceof Error ? error.message : String(error);
+      }
+    };
+
+    const terminate = () => {
+      sendSignal("SIGTERM");
+      if (!forceKillTimer) {
+        forceKillTimer = setTimeout(() => sendSignal("SIGKILL"), killGraceMs);
+        forceKillTimer.unref?.();
+      }
+    };
+
+    const appendStderr = (text: string) => {
+      stderr += text;
+      if (Buffer.byteLength(stderr, "utf8") > maxStderrBytes) {
+        stderr = tailBytes(stderr, maxStderrBytes);
+        stderrTruncated = true;
+      }
+    };
+
+    const processLine = (line: string) => {
+      if (!line.trim()) return;
+      let event: unknown;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        droppedLines++;
+        return;
+      }
+      if (event && typeof event === "object") options.onEvent?.(event);
+      else droppedLines++;
+    };
+
+    proc.stdout.on("data", (data: Buffer) => {
+      buffer += stdoutDecoder.write(data);
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) processLine(line);
+    });
+
+    proc.stderr.on("data", (data: Buffer) => {
+      appendStderr(stderrDecoder.write(data));
+    });
+
+    proc.on("close", (code, closeSignal) => {
+      buffer += stdoutDecoder.end();
+      appendStderr(stderrDecoder.end());
+      if (buffer.trim()) processLine(buffer);
+      finish(code, closeSignal);
+    });
+
+    proc.on("error", (error) => {
+      spawnError = error.message;
+      finish(1, null);
+    });
+
+    if (proc.pid !== undefined && options.registry) options.registry.add(proc.pid, closed);
+
+    if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        if (processClosed) return;
+        timedOut = true;
+        terminate();
+      }, options.timeoutMs);
+    }
+
+    if (options.signal) {
+      abortHandler = () => {
+        if (aborted) return;
+        aborted = true;
+        terminate();
+      };
+      if (options.signal.aborted) abortHandler();
+      else options.signal.addEventListener("abort", abortHandler, { once: true });
+    }
+  });
+}
+
+type PiInvocation = (args: string[]) => { command: string; args: string[] };
+
+interface ChildRunOptions {
+  timeoutMs: number;
+  registry: ChildProcessRegistry;
+  invocation: PiInvocation;
+}
+
+/** CLI arguments for a child Pi, before the system prompt and task are appended. */
+export function buildChildArgs(
+  agent: Pick<AgentConfig, "tools">,
+  config: ResolvedDispatchConfig,
+): string[] {
+  const args = ["--mode", "json", "-p", "--no-session"];
+  args.push("--exclude-tools", CHILD_EXCLUDED_TOOLS.join(","));
+  if (config.model) args.push("--model", config.model);
+  if (config.thinkingLevel) args.push("--thinking", config.thinkingLevel);
+  if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+  return args;
+}
+
+function subagentDepth(env: NodeJS.ProcessEnv): number {
+  const depth = Number.parseInt(env[SUBAGENT_DEPTH_ENV] ?? "", 10);
+  return Number.isFinite(depth) && depth > 0 ? depth : 0;
+}
+
+/** Environment for a child Pi, marking it as one level deeper than this process. */
+export function childEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...env, [SUBAGENT_DEPTH_ENV]: String(subagentDepth(env) + 1) };
+}
+
 async function runSingleAgent(
   defaultCwd: string,
   dispatchDefaults: DispatchDefaults,
@@ -743,6 +1163,7 @@ async function runSingleAgent(
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
+  runOptions: ChildRunOptions,
 ): Promise<SingleResult> {
   const agent = agents.find((a) => a.name === agentName);
   const dispatchConfig = resolveDispatchConfig(agent?.model, invocationModel, dispatchDefaults);
@@ -764,12 +1185,7 @@ async function runSingleAgent(
     };
   }
 
-  const args: string[] = ["--mode", "json", "-p", "--no-session"];
-  if (dispatchConfig.model) args.push("--model", dispatchConfig.model);
-  if (dispatchConfig.thinkingLevel) {
-    args.push("--thinking", dispatchConfig.thinkingLevel);
-  }
-  if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+  const args = buildChildArgs(agent, dispatchConfig);
 
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
@@ -823,104 +1239,66 @@ async function runSingleAgent(
     }
 
     args.push(`Task: ${task}`);
-    let wasAborted = false;
+    const invocation = runOptions.invocation(args);
+    const outcome = await runChildProcess(invocation.command, invocation.args, {
+      cwd: cwd ?? defaultCwd,
+      env: childEnvironment(process.env),
+      signal,
+      timeoutMs: runOptions.timeoutMs,
+      registry: runOptions.registry,
+      onEvent: (event) => {
+        if (event.type === "message_end" && event.message) {
+          const msg = event.message as Message;
+          currentResult.messages.push(msg);
 
-    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve) => {
-        const invocation = getPiInvocation(args);
-        const proc = spawn(invocation.command, invocation.args, {
-          cwd: cwd ?? defaultCwd,
-          detached: process.platform !== "win32",
-          shell: false,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        let buffer = "";
-        let processClosed = false;
-        let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-        let abortHandler: (() => void) | undefined;
-
-        const finish = (code: number | null, closeSignal: NodeJS.Signals | null) => {
-          if (processClosed) return;
-          processClosed = true;
-          if (forceKillTimer && !wasAborted) clearTimeout(forceKillTimer);
-          if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
-          resolve({ code, signal: closeSignal });
-        };
-
-        const processLine = (line: string) => {
-          if (!line.trim()) return;
-          let event: any;
-          try {
-            event = JSON.parse(line);
-          } catch {
-            return;
-          }
-
-          if (event.type === "message_end" && event.message) {
-            const msg = event.message as Message;
-            currentResult.messages.push(msg);
-
-            if (msg.role === "assistant") {
-              currentResult.usage.turns++;
-              const usage = msg.usage;
-              if (usage) {
-                addUsage(currentResult.usage.total, usage);
-                currentResult.usage.contextTokens = usage.totalTokens;
-              }
-              if (!currentResult.model && msg.model) currentResult.model = msg.model;
-              if (msg.stopReason) currentResult.stopReason = msg.stopReason;
-              if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
-            } else if (msg.role === "toolResult" && msg.usage) {
-              addUsage(currentResult.usage.total, msg.usage);
+          if (msg.role === "assistant") {
+            currentResult.usage.turns++;
+            const usage = msg.usage;
+            if (usage) {
+              addUsage(currentResult.usage.total, usage);
+              currentResult.usage.contextTokens = usage.totalTokens;
             }
-            emitUpdate();
+            if (!currentResult.model && msg.model) currentResult.model = msg.model;
+            if (msg.stopReason) currentResult.stopReason = msg.stopReason;
+            if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+          } else if (msg.role === "toolResult" && msg.usage) {
+            addUsage(currentResult.usage.total, msg.usage);
           }
+          emitUpdate();
+        }
 
-          if (event.type === "compaction_end" && event.result?.usage) {
-            addUsage(currentResult.usage.total, event.result.usage as Usage);
-          }
-        };
-
-        proc.stdout.on("data", (data) => {
-          buffer += data.toString();
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) processLine(line);
-        });
-
-        proc.stderr.on("data", (data) => {
-          currentResult.stderr += data.toString();
-        });
-
-        proc.on("close", (code, closeSignal) => {
-          if (buffer.trim()) processLine(buffer);
-          finish(code, closeSignal);
-        });
-
-        proc.on("error", (error) => {
-          currentResult.errorMessage = `Failed to start subagent: ${error.message}`;
-          finish(1, null);
-        });
-
-        if (signal) {
-          abortHandler = () => {
-            if (wasAborted) return;
-            wasAborted = true;
-            if (proc.pid === undefined) return;
-            signalProcessTree(proc.pid, "SIGTERM");
-            forceKillTimer = setTimeout(() => signalProcessTree(proc.pid!, "SIGKILL"), 5000);
-            forceKillTimer.unref?.();
-          };
-          if (signal.aborted) abortHandler();
-          else signal.addEventListener("abort", abortHandler, { once: true });
+        if (event.type === "compaction_end" && event.result?.usage) {
+          addUsage(currentResult.usage.total, event.result.usage as Usage);
         }
       },
-    );
+    });
 
-    const status = classifyChildExit(exit.code, exit.signal, wasAborted);
+    currentResult.stderr = outcome.stderr;
+    if (outcome.stderrTruncated) currentResult.stderrTruncated = true;
+    if (outcome.droppedLines > 0) currentResult.droppedLines = outcome.droppedLines;
+    if (outcome.spawnError) {
+      currentResult.errorMessage = `Failed to start subagent: ${outcome.spawnError}`;
+    }
+    const status = classifyChildExit(
+      outcome.code,
+      outcome.signal,
+      outcome.aborted,
+      outcome.timedOut ? runOptions.timeoutMs : undefined,
+    );
     currentResult.exitCode = status.exitCode;
     if (status.stopReason) currentResult.stopReason = status.stopReason;
     if (status.errorMessage) currentResult.errorMessage = status.errorMessage;
+    if (outcome.signalError) {
+      const note = `Failed to signal the subagent process group: ${outcome.signalError}`;
+      currentResult.errorMessage = currentResult.errorMessage
+        ? `${currentResult.errorMessage}; ${note}`
+        : note;
+    }
+    const completion = classifyChildCompletion(currentResult);
+    if (completion) {
+      currentResult.stopReason = completion.stopReason;
+      currentResult.errorMessage = completion.errorMessage;
+    }
     currentResult.completedAt = Date.now();
     return currentResult;
   } finally {
@@ -994,18 +1372,27 @@ const SubagentParams = Type.Object({
     }),
   ),
   agentScope: Type.Optional(AgentScopeSchema),
-  confirmProjectAgents: Type.Optional(
-    Type.Boolean({
-      description: "Prompt before running project-local agents. Default: true.",
-      default: true,
-    }),
-  ),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for the agent process (single mode)" }),
   ),
+  timeoutMs: Type.Optional(
+    Type.Integer({
+      minimum: 1000,
+      description: `Wall-clock limit per child in milliseconds. Default: ${DEFAULT_CHILD_TIMEOUT_MS} (45 minutes).`,
+    }),
+  ),
 });
 
-export default function (pi: ExtensionAPI) {
+export default function (
+  pi: ExtensionAPI,
+  registry: ChildProcessRegistry = new ChildProcessRegistry(),
+  invocation: PiInvocation = getPiInvocation,
+) {
+  const authorizationGate = new ReviewAuthorizationGate();
+
+  pi.on("session_shutdown", async () => {
+    await registry.shutdown();
+  });
   pi.on("tool_result", (event) => {
     if (event.toolName !== "subagent" || !hasFailedSubagentResult(event.details)) return;
     return { isError: true };
@@ -1021,6 +1408,8 @@ export default function (pi: ExtensionAPI) {
       "Single, parallel, and chain invocations may override the agent model.",
       `Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
       `To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
+      "code-reviewer and plan-reviewer run only under the /review-code or /review-plan template, once per user message.",
+      `Each child is killed after ${DEFAULT_CHILD_TIMEOUT_MS / 60000} minutes unless timeoutMs overrides it.`,
     ].join(" "),
     parameters: SubagentParams,
 
@@ -1032,7 +1421,11 @@ export default function (pi: ExtensionAPI) {
       };
       const discovery = discoverAgents(ctx.cwd, agentScope);
       const agents = discovery.agents;
-      const confirmProjectAgents = params.confirmProjectAgents ?? true;
+      const runOptions: ChildRunOptions = {
+        timeoutMs: params.timeoutMs ?? DEFAULT_CHILD_TIMEOUT_MS,
+        registry,
+        invocation,
+      };
 
       const hasChain = (params.chain?.length ?? 0) > 0;
       const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -1047,6 +1440,18 @@ export default function (pi: ExtensionAPI) {
           projectAgentsDir: discovery.projectAgentsDir,
           results,
         });
+      const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
+      const refuse = (text: string): AgentToolResult<SubagentDetails> => ({
+        content: [{ type: "text", text }],
+        details: { ...makeDetails(mode)([]), failure: text },
+      });
+
+      const depth = subagentDepth(process.env);
+      if (depth > 0) {
+        return refuse(
+          `Nested dispatch refused: this Pi process is already running as a subagent (depth ${depth}). Do the work directly and report anything you could not finish.`,
+        );
+      }
 
       if (modeCount !== 1) {
         const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
@@ -1061,32 +1466,43 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      if (
-        (agentScope === "project" || agentScope === "both") &&
-        confirmProjectAgents &&
-        ctx.hasUI
-      ) {
-        const requestedAgentNames = new Set<string>();
-        if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
-        if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
-        if (params.agent) requestedAgentNames.add(params.agent);
+      const requestedAgentNames = new Set<string>();
+      if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
+      if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
+      if (params.agent) requestedAgentNames.add(params.agent);
 
+      // Consumed before the first await, so parallel tool calls cannot share one authorization.
+      const authorizationRefusal = authorizationGate.authorize(
+        requestedAgentNames,
+        ctx.sessionManager,
+      );
+      if (authorizationRefusal) return refuse(authorizationRefusal);
+
+      if (agentScope === "project" || agentScope === "both") {
         const projectAgentsRequested = Array.from(requestedAgentNames)
           .map((name) => agents.find((a) => a.name === name))
           .filter((a): a is AgentConfig => a?.source === "project");
 
+        // Project agents are repository-controlled, so they need both Pi's project
+        // trust and a person's confirmation; a headless session cannot supply the latter.
         if (projectAgentsRequested.length > 0) {
           const names = projectAgentsRequested.map((a) => a.name).join(", ");
           const dir = discovery.projectAgentsDir ?? "(unknown)";
+          if (!ctx.isProjectTrusted()) {
+            return refuse(
+              `Project-local agents (${names}) from ${dir} require a trusted project. Use user agents or ask the user to trust the project.`,
+            );
+          }
+          if (!ctx.hasUI) {
+            return refuse(
+              `Project-local agents (${names}) from ${dir} require an interactive confirmation, which this session cannot show. Use user agents instead.`,
+            );
+          }
           const ok = await ctx.ui.confirm(
             "Run project-local agents?",
             `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
           );
-          if (!ok)
-            return {
-              content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-              details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
-            };
+          if (!ok) return refuse("Canceled: project-local agents not approved.");
         }
       }
 
@@ -1111,7 +1527,7 @@ export default function (pi: ExtensionAPI) {
 
         for (let i = 0; i < params.chain.length; i++) {
           const step = params.chain[i];
-          const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
+          const taskWithContext = substitutePrevious(step.task, previousOutput);
           const chainUpdate: OnUpdateCallback | undefined = onUpdate
             ? (partial) => {
                 const currentResult = partial.details?.results[0];
@@ -1142,6 +1558,7 @@ export default function (pi: ExtensionAPI) {
             signal,
             chainUpdate,
             makeDetails("chain"),
+            runOptions,
           );
           result.task = step.task;
           result.label = step.label;
@@ -1245,6 +1662,7 @@ export default function (pi: ExtensionAPI) {
                 }
               },
               makeDetails("parallel"),
+              runOptions,
             );
             allResults[index] = result;
             emitParallelUpdate();
@@ -1286,6 +1704,7 @@ export default function (pi: ExtensionAPI) {
           signal,
           onUpdate,
           makeDetails("single"),
+          runOptions,
         );
         const isError = isFailedResult(result);
         if (isError) {
@@ -1339,7 +1758,7 @@ export default function (pi: ExtensionAPI) {
         return new Text(text, 0, 0);
       }
       const agentName = args.agent || "...";
-      const responsibility = args.label || args.task;
+      const responsibility = singleLine(args.label || args.task || "");
       const preview = responsibility
         ? responsibility.length > 60
           ? `${responsibility.slice(0, 60)}...`
@@ -1391,7 +1810,7 @@ export default function (pi: ExtensionAPI) {
         addFailureDiagnostic(container, r, theme);
         container.addChild(new Spacer(1));
         container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
-        container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
+        container.addChild(new Text(theme.fg("dim", sanitizeTaskText(r.task)), 0, 0));
         container.addChild(new Spacer(1));
         container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
         if (displayItems.length === 0 && !finalOutput) {
@@ -1458,7 +1877,9 @@ export default function (pi: ExtensionAPI) {
               0,
             ),
           );
-          container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+          container.addChild(
+            new Text(theme.fg("muted", "Task: ") + theme.fg("dim", sanitizeTaskText(r.task)), 0, 0),
+          );
           if (resultStatus(r) === "queued") {
             container.addChild(new Text(theme.fg("dim", "(not run)"), 0, 0));
           } else {
@@ -1525,7 +1946,9 @@ export default function (pi: ExtensionAPI) {
           container.addChild(
             new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
           );
-          container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+          container.addChild(
+            new Text(theme.fg("muted", "Task: ") + theme.fg("dim", sanitizeTaskText(r.task)), 0, 0),
+          );
           addFailureDiagnostic(container, r, theme);
 
           // Show tool calls
