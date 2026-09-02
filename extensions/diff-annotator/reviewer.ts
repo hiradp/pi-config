@@ -26,7 +26,6 @@ export type ReviewerDoneResult = { action: "write"; force: boolean } | { action:
 export interface ReviewerComponentOptions {
   snapshot: ReviewSnapshot;
   parsed: ParsedReview;
-  width: number;
   height: number;
   comments: ReviewComment[];
 }

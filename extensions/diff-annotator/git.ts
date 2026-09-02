@@ -7,6 +7,11 @@ import type { ReviewChangeStatus, ReviewFile, ReviewFileKind, ReviewSnapshot } f
 const MAX_TOTAL_DIFF_BYTES = 1024 * 1024;
 const MAX_UNTRACKED_FILE_BYTES = 256 * 1024;
 const MAX_PATCH_BYTES = 256 * 1024;
+const GIT_TIMEOUT_MS = 15_000;
+
+// Git's marker sits at column 0; content lines always carry a +, -, or space
+// prefix, so text that merely mentions the phrase does not match.
+const BINARY_PATCH_MARKER = /^Binary files .* differ$/m;
 
 const BINARY_EXTENSIONS = new Set([
   ".7z",
@@ -54,26 +59,61 @@ export interface RunGitLike {
     command: string,
     args: string[],
     options?: { cwd?: string; timeout?: number; signal?: AbortSignal },
-  ): Promise<{ code: number; stdout: string; stderr: string }>;
+  ): Promise<{ code: number; stdout: string; stderr: string; killed?: boolean }>;
 }
 
-export async function getRepoRoot(runner: RunGitLike, cwd: string): Promise<string> {
-  const result = await runner.exec("git", ["rev-parse", "--show-toplevel"], { cwd });
+export interface CaptureOptions {
+  signal?: AbortSignal;
+}
+
+interface GitContext {
+  runner: RunGitLike;
+  signal?: AbortSignal;
+}
+
+// Pi's exec resolves a killed child with code 0 and whatever output had
+// arrived, so timeouts and cancellation are only visible through `killed`.
+async function runGit(
+  git: GitContext,
+  args: string[],
+  cwd: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const result = await git.runner.exec("git", args, {
+    cwd,
+    timeout: GIT_TIMEOUT_MS,
+    signal: git.signal,
+  });
+  if (result.killed) {
+    throw new Error(
+      git.signal?.aborted
+        ? "Diff capture was cancelled"
+        : `git ${args[0]} timed out after ${GIT_TIMEOUT_MS / 1000}s`,
+    );
+  }
+  return result;
+}
+
+async function getRepoRoot(git: GitContext, cwd: string): Promise<string> {
+  const result = await runGit(git, ["rev-parse", "--show-toplevel"], cwd);
   if (result.code !== 0) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || "Not inside a Git repository.");
   }
   return result.stdout.trim();
 }
 
-async function hasHead(runner: RunGitLike, repoRoot: string): Promise<boolean> {
-  const result = await runner.exec("git", ["rev-parse", "--verify", "HEAD"], {
-    cwd: repoRoot,
-  });
+async function hasHead(git: GitContext, repoRoot: string): Promise<boolean> {
+  const result = await runGit(git, ["rev-parse", "--verify", "HEAD"], repoRoot);
   return result.code === 0;
 }
 
-function baseRevisionFor(repositoryHasHead: boolean): string {
-  return repositoryHasHead ? "HEAD" : "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+// The empty tree's id depends on the repository's object format, so ask Git
+// for it rather than assuming the SHA-1 value.
+async function emptyTreeRevision(git: GitContext, repoRoot: string): Promise<string> {
+  const result = await runGit(git, ["hash-object", "-t", "tree", "/dev/null"], repoRoot);
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || "Failed to determine the empty tree id.");
+  }
+  return result.stdout.trim();
 }
 
 function splitNulSeparated(output: string): string[] {
@@ -132,14 +172,14 @@ function buildFileId(record: RawFileRecord): string {
 }
 
 async function getStatusRecords(
-  runner: RunGitLike,
+  git: GitContext,
   repoRoot: string,
   baseRevision: string,
 ): Promise<RawFileRecord[]> {
-  const result = await runner.exec(
-    "git",
+  const result = await runGit(
+    git,
     ["diff", "--find-renames", "-M", "--name-status", "-z", baseRevision, "--"],
-    { cwd: repoRoot },
+    repoRoot,
   );
   if (result.code !== 0) {
     throw new Error(
@@ -175,10 +215,8 @@ async function getStatusRecords(
   return records;
 }
 
-async function getUntrackedRecords(runner: RunGitLike, repoRoot: string): Promise<RawFileRecord[]> {
-  const result = await runner.exec("git", ["ls-files", "--others", "--exclude-standard", "-z"], {
-    cwd: repoRoot,
-  });
+async function getUntrackedRecords(git: GitContext, repoRoot: string): Promise<RawFileRecord[]> {
+  const result = await runGit(git, ["ls-files", "--others", "--exclude-standard", "-z"], repoRoot);
   if (result.code !== 0) return [];
   return splitNulSeparated(result.stdout).map((path) => ({
     status: "added" as const,
@@ -239,12 +277,17 @@ function splitPatchIntoFilePatches(
   boundaryKeys: Map<string, string>,
 ): Map<string, string> {
   const lines = patch.split("\n");
+  if (lines.at(-1) === "") lines.pop();
   const patches = new Map<string, string[]>();
   let currentKey: string | null = null;
   let currentBody: string[] = [];
 
+  // A type change (file to symlink, for instance) emits one section per side
+  // under the same boundary line; keep every section.
   const commit = (): void => {
-    if (currentKey !== null) patches.set(currentKey, currentBody);
+    if (currentKey !== null) {
+      patches.set(currentKey, [...(patches.get(currentKey) ?? []), ...currentBody]);
+    }
   };
 
   for (const line of lines) {
@@ -264,12 +307,10 @@ function splitPatchIntoFilePatches(
   );
 }
 
-function patchKey(record: RawFileRecord): string {
-  return record.newPath ?? record.oldPath ?? "(unknown)";
-}
-
+// Patches are keyed by file id rather than path: a file removed from the
+// index appears both as a deletion and as an untracked addition.
 async function getTrackedPatches(
-  runner: RunGitLike,
+  git: GitContext,
   repoRoot: string,
   baseRevision: string,
   records: RawFileRecord[],
@@ -288,10 +329,7 @@ async function getTrackedPatches(
     baseRevision,
     "--",
   ];
-  const result = await runner.exec("git", args, {
-    cwd: repoRoot,
-    timeout: 15_000,
-  });
+  const result = await runGit(git, args, repoRoot);
   if (result.code !== 0) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || "Failed to read Git diff.");
   }
@@ -299,20 +337,22 @@ async function getTrackedPatches(
   const boundaryKeys = new Map<string, string>();
   for (const record of records) {
     for (const line of expectedBoundaryLines(record)) {
-      boundaryKeys.set(line, patchKey(record));
+      boundaryKeys.set(line, buildFileId(record));
     }
   }
 
   const split = splitPatchIntoFilePatches(result.stdout, boundaryKeys);
   for (const record of records) {
-    const patch = split.get(patchKey(record)) ?? "";
-    patchMap.set(patchKey(record), patch);
+    const key = buildFileId(record);
+    patchMap.set(key, split.get(key) ?? "");
   }
   return patchMap;
 }
 
 function buildAddedPatch(path: string, contents: string, mode = "100644"): string {
-  const lines = contents.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  // Split on LF only, as Git does: a CR inside a line is content, and the
+  // parser drops a trailing CR.
+  const lines = contents.split("\n");
   const hasTrailingNewline = lines.at(-1) === "";
   const contentLines = hasTrailingNewline ? lines.slice(0, -1) : lines;
   const hunkLines = Math.max(1, contentLines.length);
@@ -471,7 +511,7 @@ function fingerprintFor(
 
   const ordered = [...records].sort((a, b) => buildFileId(a).localeCompare(buildFileId(b)));
   for (const record of ordered) {
-    const patch = patches.get(patchKey(record));
+    const patch = patches.get(buildFileId(record));
     hash.update(`${buildFileId(record)}\n${patch?.kind ?? "missing"}\n`);
     if (patch) hash.update(patch.patch);
     if (patch?.digest) hash.update(patch.digest);
@@ -481,64 +521,83 @@ function fingerprintFor(
   return hash.digest("hex");
 }
 
+// Everything before the first hunk. The index line names the blob on each
+// side, which keeps the fingerprint sensitive to content the review itself
+// no longer carries.
+function patchHeader(patch: string): string {
+  const lines = patch.split("\n");
+  const firstHunk = lines.findIndex((line) => line.startsWith("@@ -"));
+  return firstHunk < 0 ? patch : `${lines.slice(0, firstHunk).join("\n")}\n`;
+}
+
+const OMITTED_NOTE = "Omitted because the complete review snapshot exceeded 1MB";
+
 export async function captureReviewSnapshot(
   runner: RunGitLike,
   cwd: string,
+  options: CaptureOptions = {},
 ): Promise<ReviewSnapshot> {
-  const repoRoot = await getRepoRoot(runner, cwd);
-  const repositoryHasHead = await hasHead(runner, repoRoot);
-  const baseRevision = baseRevisionFor(repositoryHasHead);
+  const git: GitContext = { runner, signal: options.signal };
+  const repoRoot = await getRepoRoot(git, cwd);
+  const repositoryHasHead = await hasHead(git, repoRoot);
+  const baseRevision = repositoryHasHead ? "HEAD" : await emptyTreeRevision(git, repoRoot);
   const head = repositoryHasHead
-    ? (await runner.exec("git", ["rev-parse", "HEAD"], { cwd: repoRoot })).stdout.trim()
+    ? (await runGit(git, ["rev-parse", "HEAD"], repoRoot)).stdout.trim()
     : null;
 
-  const records = await getStatusRecords(runner, repoRoot, baseRevision);
-  const untrackedRecords = await getUntrackedRecords(runner, repoRoot);
+  const records = await getStatusRecords(git, repoRoot, baseRevision);
+  const untrackedRecords = await getUntrackedRecords(git, repoRoot);
   const recordKeys = new Set(records.map(buildFileId));
   for (const record of untrackedRecords) {
     if (!recordKeys.has(buildFileId(record))) records.push(record);
   }
 
   const trackedRecords = records.filter((record) => record.oldPath !== null);
-  const trackedPatches = await getTrackedPatches(runner, repoRoot, baseRevision, trackedRecords);
+  const trackedPatches = await getTrackedPatches(git, repoRoot, baseRevision, trackedRecords);
 
   const details = new Map<string, FilePatchDetail>();
   let totalPatchBytes = 0;
   let truncated = false;
 
   for (const record of records) {
-    const key = patchKey(record);
+    const key = buildFileId(record);
+    const untracked = record.oldPath === null && record.newPath !== null;
     let kind: ReviewFileKind = "text";
     let note: string | undefined;
     let patch = trackedPatches.get(key) ?? "";
     let digest: string | undefined;
 
-    if (record.oldPath === null && record.newPath !== null) {
-      const untracked = await getUntrackedPatch(repoRoot, record);
-      patch = untracked.patch;
-      kind = untracked.kind;
-      note = untracked.note;
-      digest = untracked.digest;
-    } else if (
-      patch.includes("Binary files ") ||
-      isProbablyBinaryPath(record.newPath ?? record.oldPath ?? "")
-    ) {
-      // Keep the real patch: its index line carries the blob hashes, which the
-      // fingerprint relies on to notice content changes.
-      kind = "binary";
-      note = "Binary file";
-    } else if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
-      kind = "too-large";
-      note = `Patch is larger than ${Math.floor(MAX_PATCH_BYTES / 1024)}KB`;
+    // The budget is checked before touching the file system, so an untracked
+    // file past it is never opened, read, or hashed.
+    if (totalPatchBytes <= MAX_TOTAL_DIFF_BYTES) {
+      if (untracked) {
+        const result = await getUntrackedPatch(repoRoot, record);
+        patch = result.patch;
+        kind = result.kind;
+        note = result.note;
+        digest = result.digest;
+      } else if (
+        BINARY_PATCH_MARKER.test(patch) ||
+        isProbablyBinaryPath(record.newPath ?? record.oldPath ?? "")
+      ) {
+        // Keep the real patch: its index line carries the blob hashes, which the
+        // fingerprint relies on to notice content changes.
+        kind = "binary";
+        note = "Binary file";
+      } else if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
+        kind = "too-large";
+        note = `Patch is larger than ${Math.floor(MAX_PATCH_BYTES / 1024)}KB`;
+        patch = patchHeader(patch);
+      }
+      totalPatchBytes += Buffer.byteLength(patch, "utf8");
     }
 
-    totalPatchBytes += Buffer.byteLength(patch, "utf8");
     if (totalPatchBytes > MAX_TOTAL_DIFF_BYTES) {
       truncated = true;
       kind = "too-large";
-      note = "Omitted because the complete review snapshot exceeded 1MB";
-      patch = "";
-      if (!digest && record.newPath) {
+      note = OMITTED_NOTE;
+      patch = patchHeader(patch);
+      if (!digest && untracked && record.newPath) {
         digest = await statDigest(resolve(repoRoot, record.newPath));
       }
     }
@@ -547,7 +606,7 @@ export async function captureReviewSnapshot(
   }
 
   const files: ReviewFile[] = records.map((record) => {
-    const detail = details.get(patchKey(record)) ?? { patch: "", kind: "error" as const };
+    const detail = details.get(buildFileId(record)) ?? { patch: "", kind: "error" as const };
     return {
       id: buildFileId(record),
       oldPath: record.oldPath,

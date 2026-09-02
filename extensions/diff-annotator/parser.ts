@@ -2,9 +2,26 @@ import type { ReviewHunk, ReviewLine, ReviewLineKind, ReviewSnapshot } from "./t
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
+// C0 and C1 controls other than tab. Left intact they reach the terminal,
+// which measures them as zero-width and then acts on them: OSC clipboard
+// writes, alternate-screen switches, BEL.
+const CONTROL_CHARACTERS = /[\x00-\x08\x0a-\x1f\x7f-\x9f]/g;
+
 export interface ParsedReview {
   files: ReviewSnapshot["files"];
   lines: ReviewLine[];
+}
+
+// Show controls the way Vim does (^[ for escape, ^M for a carriage return) so
+// they are visible in the review instead of acting on the terminal. Tabs are
+// kept and expanded when rendered.
+function sanitizeDisplayText(text: string): string {
+  return text.replace(CONTROL_CHARACTERS, (character) => {
+    const code = character.charCodeAt(0);
+    if (code === 0x7f) return "^?";
+    if (code < 0x20) return `^${String.fromCharCode(code + 0x40)}`;
+    return `<${code.toString(16)}>`;
+  });
 }
 
 function parseHunkHeader(header: string): Omit<ReviewHunk, "lines"> | null {
@@ -12,7 +29,7 @@ function parseHunkHeader(header: string): Omit<ReviewHunk, "lines"> | null {
   if (!match) return null;
   return {
     index: 0,
-    header,
+    header: sanitizeDisplayText(header),
     oldStart: Number(match[1]),
     oldLines: Number(match[2] ?? "1"),
     newStart: Number(match[3]),
@@ -41,27 +58,46 @@ export function parseReviewSnapshot(snapshot: ReviewSnapshot): ParsedReview {
         id: nextLineId,
         fileIndex,
         hunkIndex,
-        lineIndex: hunkIndex >= 0 ? lines.length : -1,
+        lineIndex: -1,
         kind,
-        text,
+        text: sanitizeDisplayText(text),
         oldLine: oldLineNumber,
         newLine: newLineNumber,
       });
       nextLineId += 1;
     };
 
-    pushLine("file", file.displayPath);
+    const displayPath = sanitizeDisplayText(file.displayPath);
+    pushLine("file", displayPath);
 
-    const patchLines = file.patch.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    // Binary, oversized, and unreadable files carry at most a header patch;
+    // show the reason instead of parsing what is left.
+    if (!file.reviewable) {
+      pushLine("meta", file.note ?? "No reviewable patch");
+      return { ...file, displayPath, hunks };
+    }
+
+    // Git breaks lines on LF only: a trailing CR comes from CRLF content and
+    // is dropped, while a CR inside a line is content and stays there.
+    const patchLines = file.patch
+      .split("\n")
+      .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
     if (patchLines.at(-1) === "") patchLines.pop();
 
     for (const rawLine of patchLines) {
-      if (rawLine.startsWith("diff --git ") || rawLine.startsWith("index ")) continue;
+      // A type change emits a second section for the same file; its headers
+      // must not be read as content of the previous hunk.
+      if (rawLine.startsWith("diff --git ")) {
+        hunk = null;
+        continue;
+      }
+      if (rawLine.startsWith("index ")) continue;
       if (rawLine.startsWith("similarity index ") || rawLine.startsWith("dissimilarity index ")) {
         continue;
       }
 
-      if (rawLine.startsWith("--- ") || rawLine.startsWith("+++ ")) {
+      // Inside a hunk these are content: removing "-- foo" yields "--- foo".
+      if (!hunk && (rawLine.startsWith("--- ") || rawLine.startsWith("+++ "))) {
         pushLine("meta", rawLine);
         continue;
       }
@@ -102,7 +138,9 @@ export function parseReviewSnapshot(snapshot: ReviewSnapshot): ParsedReview {
       } else if (prefix === "-") {
         pushLine("removal", rawLine.slice(1), hunk.index, oldLine, null);
         oldLine += 1;
-      } else if (rawLine.length > 0) {
+      } else {
+        // With diff.suppressBlankEmpty Git writes a blank context line as an
+        // empty line instead of a single space; it still occupies a line.
         const text = prefix === " " ? rawLine.slice(1) : rawLine;
         pushLine("context", text, hunk.index, oldLine, newLine);
         oldLine += 1;
@@ -114,7 +152,7 @@ export function parseReviewSnapshot(snapshot: ReviewSnapshot): ParsedReview {
       pushLine("meta", file.note ?? "No reviewable patch");
     }
 
-    return { ...file, hunks };
+    return { ...file, displayPath, hunks };
   });
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -138,14 +176,4 @@ export function lineIsSelectable(line: ReviewLine | undefined): line is ReviewLi
     line.hunkIndex >= 0 &&
     (line.kind === "context" || line.kind === "addition" || line.kind === "removal")
   );
-}
-
-export function commentLocation(
-  snapshot: ParsedReview,
-  line: ReviewLine,
-): { file: string; side: string; range: string } {
-  const file = snapshot.files[line.fileIndex]?.displayPath ?? "(unknown file)";
-  if (line.kind === "addition") return { file, side: "new", range: `${line.newLine}` };
-  if (line.kind === "removal") return { file, side: "old", range: `${line.oldLine}` };
-  return { file, side: "context", range: `${line.oldLine ?? "?"}/${line.newLine ?? "?"}` };
 }

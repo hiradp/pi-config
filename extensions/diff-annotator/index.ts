@@ -45,7 +45,7 @@ async function runAnnotator(
   };
   let snapshot;
   try {
-    snapshot = await deps.captureSnapshot(runner, ctx.cwd);
+    snapshot = await deps.captureSnapshot(runner, ctx.cwd, { signal: ctx.signal });
   } catch (error) {
     ctx.ui.notify(
       `Failed to capture working-tree diff: ${error instanceof Error ? error.message : String(error)}`,
@@ -67,6 +67,15 @@ async function runAnnotator(
     ctx.ui.notify("No reviewable text changes found", "info");
     return;
   }
+  if (snapshot.skippedCount > 0) {
+    const reason = snapshot.truncated
+      ? "the review snapshot exceeded 1MB"
+      : "binary, too large, or unreadable";
+    ctx.ui.notify(
+      `Skipped ${snapshot.skippedCount} of ${snapshot.files.length} changed files (${reason})`,
+      snapshot.truncated ? "warning" : "info",
+    );
+  }
 
   const comments: ReviewComment[] = [];
 
@@ -75,7 +84,6 @@ async function runAnnotator(
       const options = {
         snapshot: reviewSnapshot,
         parsed,
-        width: Math.max(1, tui.terminal.columns),
         height: Math.max(1, tui.terminal.rows - 1),
         comments,
       };
@@ -89,7 +97,6 @@ async function runAnnotator(
           component.focused = value;
         },
         render: (width) => {
-          options.width = Math.max(1, width);
           options.height = Math.max(1, tui.terminal.rows - 1);
           return component.render(width);
         },
@@ -128,7 +135,8 @@ async function runAnnotator(
 
     let latestFingerprint: string | null = null;
     try {
-      latestFingerprint = (await deps.captureSnapshot(runner, ctx.cwd)).fingerprint;
+      latestFingerprint = (await deps.captureSnapshot(runner, ctx.cwd, { signal: ctx.signal }))
+        .fingerprint;
     } catch (error) {
       ctx.ui.notify(
         `Could not verify working-tree state: ${error instanceof Error ? error.message : String(error)}`,
