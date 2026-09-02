@@ -74,8 +74,12 @@ function assistantEntry(id: string, text: string) {
   } as unknown as SessionEntry;
 }
 
-function assistantMessage(text: string, stopReason = "stop") {
-  return { role: "assistant", content: [{ type: "text", text }], stopReason } as never;
+function assistantMessage(text: string | string[], stopReason = "stop") {
+  const content = (Array.isArray(text) ? text : [text]).map((part) => ({
+    type: "text" as const,
+    text: part,
+  }));
+  return { role: "assistant", content, stopReason } as never;
 }
 
 const branch = (entries: SessionEntry[]) => ({ getBranch: () => entries });
@@ -361,9 +365,24 @@ test("a child completes only with a normal final response", () => {
     ],
     [{ ...completed, stopReason: "toolUse" }, "incomplete", /"toolUse"/],
     [{ ...completed, messages: [assistantMessage(" \n")] }, "incomplete", /empty final response/],
+    [
+      {
+        ...completed,
+        messages: [
+          assistantMessage("Earlier response", "toolUse"),
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", name: "read", arguments: {} }],
+            stopReason: "stop",
+          } as never,
+        ],
+      },
+      "incomplete",
+      /empty final response/,
+    ],
     [{ ...completed, droppedLines: 2 }, "incomplete", /2 unparseable/],
     [
-      { ...completed, messages: [assistantMessage("Unsupported task: nope.\nMore.")] },
+      { ...completed, messages: [assistantMessage(["Unsupported ", "task: nope.\nMore."])] },
       "unsupported",
       /^Unsupported task: nope\.$/,
     ],
