@@ -41,6 +41,7 @@ import {
 import {
   classifySemanticAction,
   latestDirectUserInstruction,
+  semanticActionEvidence,
   type SemanticClassifier,
 } from "./semantic-review.ts";
 
@@ -177,6 +178,20 @@ export function registerGuardrails(
     if (result.decision.outcome === "block") return result;
 
     if (
+      result.decision.outcome === "review" &&
+      result.policy === semanticReviewPolicy.name &&
+      config.semanticReview.enabled &&
+      semanticActionEvidence(action) === undefined
+    ) {
+      // The classifier would only see part of the command, so it cannot vouch for all of it.
+      result = {
+        policy: semanticReviewPolicy.name,
+        decision: {
+          outcome: "confirm",
+          reason: `${result.decision.reason}\nThe command is too large for semantic review; confirm it manually.`,
+        },
+      };
+    } else if (
       result.decision.outcome === "review" &&
       result.policy === semanticReviewPolicy.name &&
       config.semanticReview.enabled

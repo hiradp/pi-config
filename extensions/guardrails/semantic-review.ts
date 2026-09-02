@@ -41,6 +41,41 @@ export type SemanticClassifier = (
   ctx: ExtensionContext,
 ) => Promise<SemanticReviewResult>;
 
+/** Commands beyond this size are not classified; the user confirms them instead. */
+export const SEMANTIC_EVIDENCE_LIMIT = 32 * 1024;
+
+/**
+ * The redacted action text the classifier evaluates. Shell commands are sent whole so a verdict
+ * covers everything that runs, unlike the truncated summary kept for display and history.
+ */
+export function semanticActionEvidence(action: GuardrailAction): string | undefined {
+  if (action.toolName === "bash" && typeof action.input.command === "string") {
+    if (action.input.command.length > SEMANTIC_EVIDENCE_LIMIT) return;
+    return `bash ${redactSensitiveText(action.input.command, Number.POSITIVE_INFINITY)}`;
+  }
+  return redactSensitiveText(actionSummary(action));
+}
+
+export function buildSemanticEvidence(request: SemanticReviewRequest) {
+  const action = semanticActionEvidence(request.action);
+  if (action === undefined) {
+    throw new Error(
+      `the command exceeds the ${SEMANTIC_EVIDENCE_LIMIT / 1024} KB classifier evidence bound`,
+    );
+  }
+  return {
+    action,
+    latestUserInstruction: request.latestUserInstruction,
+    requestingPolicy: request.requestingPolicy,
+    policyReason: redactSensitiveText(request.policyReason),
+    deterministicContext: {
+      source: request.action.source,
+      toolName: request.action.toolName,
+      cwd: request.cwd,
+    },
+  };
+}
+
 export function redactSensitiveText(value: string, maxLength = 1_000): string {
   const redacted = value
     .replace(
@@ -124,17 +159,7 @@ export const classifySemanticAction: SemanticClassifier = async (request, ctx) =
   if (!auth.ok) throw new Error(auth.error);
   if (!auth.apiKey) throw new Error(`no credentials are available for '${model.provider}'`);
 
-  const evidence = {
-    action: redactSensitiveText(actionSummary(request.action)),
-    latestUserInstruction: request.latestUserInstruction,
-    requestingPolicy: request.requestingPolicy,
-    policyReason: redactSensitiveText(request.policyReason),
-    deterministicContext: {
-      source: request.action.source,
-      toolName: request.action.toolName,
-      cwd: request.cwd,
-    },
-  };
+  const evidence = buildSemanticEvidence(request);
   const message: UserMessage = {
     role: "user",
     content: [{ type: "text", text: JSON.stringify(evidence, null, 2) }],

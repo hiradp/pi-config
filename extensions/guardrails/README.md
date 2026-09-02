@@ -32,7 +32,7 @@ Semantic review is disabled by default and only runs for configured command pref
 
 The classifier receives only:
 
-- a redacted action summary, never write/edit contents;
+- the whole redacted shell command (up to 32 KB; larger commands ask for confirmation instead) or a redacted action summary, never write/edit contents;
 - the requesting policy and reason;
 - the latest direct user instruction, not the full transcript;
 - the action source, tool name, and working directory.
