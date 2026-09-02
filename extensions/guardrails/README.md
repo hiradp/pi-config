@@ -17,7 +17,7 @@ Deterministic blocks can never be overridden by confirmation or semantic review.
 Built-in policies:
 
 - **self-protection** — blocks changes to `~/.pi/agent/settings.json` and the guardrails extension source;
-- **system safety** — blocks security weakening, persistence, shell/SSH identity-file changes, dangerous system deletion, and system permission changes;
+- **system safety** — blocks security weakening (`curl -sk` flag clusters, every git spelling of a false `sslVerify`), persistence (cron, launchd, systemd, fish configuration, launch agent plists), shell/SSH identity-file changes, recursive or `find -exec rm` deletion of root, home directories, and system paths (globs and `~user` included), and system permission changes; asks for confirmation when shell structure cannot be classified;
 - **blocked commands** — blocks configured executables, including package-runner invocations;
 - **default branch** — blocks commits and pushes involving a repository default branch;
 - **kubectl** — allows only configured read-oriented Kubernetes commands;
