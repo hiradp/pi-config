@@ -31,15 +31,13 @@ export function parseNotionId(input: string): string {
   } catch {}
 
   // Notion appends the id after the slug, so the last match wins over a hex-looking slug.
-  const compact = candidate.match(/[a-f0-9]{32}/gi)?.at(-1);
-  if (compact) {
+  const match = candidate
+    .match(/[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi)
+    ?.at(-1);
+  if (match) {
+    const compact = match.replaceAll("-", "");
     return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
   }
-
-  const uuid = candidate
-    .match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi)
-    ?.at(-1);
-  if (uuid) return uuid;
   throw new Error(`Could not extract a Notion page or database ID from: ${input}`);
 }
 

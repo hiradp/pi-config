@@ -371,6 +371,10 @@ test("extracts ids from Notion URLs and raw ids", () => {
     parseNotionId(`https://www.notion.so/ws/deadbeefdeadbeefdeadbeefdeadbeef-${COMPACT_ID}`),
     PAGE_ID,
   );
+  assert.equal(
+    parseNotionId(`https://www.notion.so/ws/deadbeefdeadbeefdeadbeefdeadbeef/${PAGE_ID}`),
+    PAGE_ID,
+  );
   assert.throws(() => parseNotionId("hello"), /Could not extract a Notion page or database ID/);
 });
 
