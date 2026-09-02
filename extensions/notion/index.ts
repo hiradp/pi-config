@@ -8,8 +8,12 @@ import {
   type TruncationResult,
 } from "@earendil-works/pi-coding-agent";
 import { readNotion, SEARCH_RESULTS_PER_SPACE, searchNotion } from "./client.ts";
+import { sanitizeDisplayText } from "./utils.ts";
 
-function truncateToolOutput(output: string): { text: string; truncation?: TruncationResult } {
+export function truncateToolOutput(output: string): {
+  text: string;
+  truncation?: TruncationResult;
+} {
   const truncation = truncateHead(output);
   if (!truncation.truncated) return { text: truncation.content };
 
@@ -76,7 +80,8 @@ export default function (pi: ExtensionAPI) {
             `- **${result.title}** (${result.type})${result.space ? ` [${result.space}]` : ""} — ${result.url}`,
         )
         .join("\n");
-      const truncated = truncateToolOutput(output);
+      // Workspace names and other record fields are not rich text, so strip the assembled output too.
+      const truncated = truncateToolOutput(sanitizeDisplayText(output));
       return {
         content: [{ type: "text" as const, text: truncated.text }],
         details: {
@@ -105,7 +110,7 @@ export default function (pi: ExtensionAPI) {
     parameters: NotionReadParams,
     async execute(_toolCallId, params: NotionReadInput, signal) {
       const result = await readNotion(params.url, signal);
-      const truncated = truncateToolOutput(result.markdown);
+      const truncated = truncateToolOutput(sanitizeDisplayText(result.markdown));
       return {
         content: [{ type: "text" as const, text: truncated.text }],
         details: {
