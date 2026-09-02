@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SlackHttpError, SlackMcpClient, type McpConnection } from "../slack/client.ts";
+import { MemoryClientIdStore, type CredentialStore } from "../slack/credentials.ts";
+import { formatSlackResult } from "../slack/format.ts";
+import { registerSlackExtension } from "../slack/index.ts";
 import type { SlackAuth } from "../slack/oauth.ts";
 import { APPROVED_SLACK_TOOLS } from "../slack/tools.ts";
 import type { SlackCallResult, SlackConfig, SlackToolMetadata } from "../slack/types.ts";
@@ -138,3 +142,41 @@ test(
     assert.equal(connection.closes, 1);
   },
 );
+
+test("app, session, and cookie tokens are redacted from results and errors", async () => {
+  const leaked = "xapp-1-A0123-456-abcdef xoxc-1234-abcd xoxd-abcd1234";
+  const result = formatSlackResult("searchMessages", {
+    content: [{ type: "text", text: leaked }],
+  });
+  assert.doesNotMatch(result.text, /xapp-|xoxc-|xoxd-/);
+  assert.match(result.text, /redacted Slack token/);
+
+  const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+  const pi = {
+    registerTool() {},
+    registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) {
+      commands.set(name, command);
+    },
+    on() {},
+  } as unknown as ExtensionAPI;
+  const store: CredentialStore = {
+    async load() {
+      throw new Error(`Slack keyring failed: ${leaked}`);
+    },
+    async save() {},
+    async delete() {},
+  };
+  registerSlackExtension(pi, { config, store, clientIdStore: new MemoryClientIdStore() });
+  const notifications: string[] = [];
+  await commands.get("slack-status")!.handler("", {
+    ui: {
+      notify(message: string) {
+        notifications.push(message);
+      },
+    },
+  });
+
+  assert.equal(notifications.length, 1);
+  assert.doesNotMatch(notifications[0]!, /xapp-|xoxc-|xoxd-/);
+  assert.match(notifications[0]!, /redacted Slack token/);
+});

@@ -12,7 +12,7 @@ import {
   type ClientIdStore,
   type CredentialStore,
 } from "./credentials.ts";
-import { formatSlackResult } from "./format.ts";
+import { formatSlackResult, redactSlackTokens } from "./format.ts";
 import { SlackAuth, type BrowserOpener } from "./oauth.ts";
 import {
   SlackReadChannelParams,
@@ -285,9 +285,7 @@ function formatDiscovery(tools: SlackToolMetadata[]): string {
 
 function safeMessage(error: unknown, fallback: string): string {
   if (!(error instanceof Error)) return fallback;
-  return error.message
-    .replace(/\b(?:xoxe\.xox[abp]|xox[abeprs])-[A-Za-z0-9-]+\b/g, "[redacted Slack token]")
-    .slice(0, 500);
+  return redactSlackTokens(error.message).slice(0, 500);
 }
 
 export default function (pi: ExtensionAPI): void {
