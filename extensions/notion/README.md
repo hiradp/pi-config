@@ -19,7 +19,7 @@ The token is cached for the Pi process. After a `401` the extension extracts it 
 
 - Search returns at most 20 results per workspace.
 - Database reads return at most the first 100 rows of the first view.
-- Page reads load at most 10 chunks of 200 blocks and render nested blocks up to 5 levels deep; deeper content is marked as omitted.
+- Page reads load at most 10 chunks of 200 blocks, make at most 10 additional requests of 100 missing referenced blocks, and render nested blocks up to 5 levels deep. Content beyond these limits is marked as omitted.
 - Synced blocks render their source content when Notion includes it in the page and are marked unavailable otherwise. User mentions render as `@` followed by the user ID.
 - Requests time out after 20 seconds.
 - Tool output is truncated at 2000 lines or 50KB, with a notice.

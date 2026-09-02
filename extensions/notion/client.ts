@@ -1,5 +1,11 @@
 import { extractToken, invalidateToken } from "./auth.ts";
-import { renderBlocks, richTextToMarkdown, richTextToPlainText, tableCell } from "./markdown.ts";
+import {
+  MAX_BLOCK_DEPTH,
+  renderBlocks,
+  richTextToMarkdown,
+  richTextToPlainText,
+  tableCell,
+} from "./markdown.ts";
 import type {
   NotionBlock,
   NotionResponse,
@@ -25,6 +31,8 @@ import {
 const API_TIMEOUT_MS = 20_000;
 export const MAX_DATABASE_ROWS = 100;
 export const MAX_PAGE_CHUNKS = 10;
+export const MAX_MISSING_BLOCK_REQUESTS = 10;
+const SYNC_BLOCK_BATCH_SIZE = 100;
 export const SEARCH_RESULTS_PER_SPACE = 20;
 
 let cachedSpaces: SpaceInfo[] | undefined;
@@ -70,8 +78,90 @@ async function notionRead<T>(
   return (await response.json()) as T;
 }
 
-async function fetchBlockTree(id: string, signal?: AbortSignal): Promise<Map<string, NotionBlock>> {
-  const blocks = new Map<string, NotionBlock>();
+function mergeBlocks(
+  blocks: Map<string, NotionBlock>,
+  records: Record<string, StoredRecord<NotionBlock>> | undefined,
+): void {
+  for (const [blockId, stored] of Object.entries(records ?? {})) {
+    const block = unwrap(stored);
+    if (block) blocks.set(blockId, block);
+  }
+}
+
+function referencedBlockIds(rootId: string, blocks: Map<string, NotionBlock>): string[] {
+  const depths = new Map<string, number>();
+
+  const visit = (id: string, depth: number): void => {
+    if (depth > MAX_BLOCK_DEPTH) return;
+    const previousDepth = depths.get(id);
+    if (previousDepth !== undefined && previousDepth <= depth) return;
+    depths.set(id, depth);
+
+    const block = blocks.get(id);
+    if (!block) return;
+    if (id !== rootId && (block.type === "page" || block.type === "collection_view_page")) {
+      return;
+    }
+
+    const childDepth =
+      id === rootId
+        ? 0
+        : block.type === "column_list" || block.type === "table"
+          ? depth
+          : depth + 1;
+    for (const childId of stringArray(block.content)) visit(childId, childDepth);
+
+    const pointer = asRecord(block.format?.transclusion_reference_pointer);
+    const sourceId = typeof pointer?.id === "string" ? pointer.id : undefined;
+    if (sourceId) visit(sourceId, depth);
+  };
+
+  visit(rootId, -1);
+  return [...depths.keys()];
+}
+
+type MissingContent = "limit" | "unavailable" | undefined;
+
+async function fetchMissingBlocks(
+  rootId: string,
+  blocks: Map<string, NotionBlock>,
+  signal?: AbortSignal,
+): Promise<MissingContent> {
+  const requested = new Set<string>();
+  let requestCount = 0;
+
+  while (requestCount < MAX_MISSING_BLOCK_REQUESTS) {
+    const batch = referencedBlockIds(rootId, blocks)
+      .filter((id) => !blocks.has(id) && !requested.has(id))
+      .slice(0, SYNC_BLOCK_BATCH_SIZE);
+    if (!batch.length) break;
+
+    for (const id of batch) requested.add(id);
+    const response = await notionRead<NotionResponse>(
+      "syncRecordValues",
+      {
+        requests: batch.map((id) => ({
+          pointer: { table: "block", id },
+          version: -1,
+        })),
+      },
+      signal,
+    );
+    mergeBlocks(blocks, response.recordMap?.block);
+    requestCount++;
+  }
+
+  const unresolved = referencedBlockIds(rootId, blocks).filter((id) => !blocks.has(id));
+  if (!unresolved.length) return undefined;
+  return unresolved.some((id) => !requested.has(id)) ? "limit" : "unavailable";
+}
+
+async function fetchBlockTree(
+  id: string,
+  root: NotionBlock,
+  signal?: AbortSignal,
+): Promise<{ blocks: Map<string, NotionBlock>; missingContent: MissingContent }> {
+  const blocks = new Map<string, NotionBlock>([[id, root]]);
   let cursor: { stack: unknown[] } = { stack: [] };
 
   for (let chunkNumber = 0; chunkNumber < MAX_PAGE_CHUNKS; chunkNumber++) {
@@ -86,15 +176,14 @@ async function fetchBlockTree(id: string, signal?: AbortSignal): Promise<Map<str
       },
       signal,
     );
-    for (const [blockId, stored] of Object.entries(response.recordMap?.block ?? {})) {
-      const block = unwrap(stored);
-      if (block) blocks.set(blockId, block);
-    }
+    mergeBlocks(blocks, response.recordMap?.block);
 
     if (!response.cursor?.stack?.length) break;
     cursor = { stack: response.cursor.stack };
   }
-  return blocks;
+
+  const missingContent = await fetchMissingBlocks(id, blocks, signal);
+  return { blocks, missingContent };
 }
 
 async function readDatabase(
@@ -188,15 +277,22 @@ export async function readNotion(input: string, signal?: AbortSignal): Promise<R
     return readDatabase(id, block, spaceId, signal);
   }
 
-  const blocks = await fetchBlockTree(id, signal);
+  const { blocks, missingContent } = await fetchBlockTree(id, block, signal);
   const page = blocks.get(id) ?? block;
   const title = richTextToPlainText(blockProperty(page, "title")) || "(untitled)";
   const body = renderBlocks(stringArray(page.content), blocks).trimEnd();
+  const warning =
+    missingContent === "limit"
+      ? "*(Some nested content was omitted after reaching the Notion read limit.)*"
+      : missingContent === "unavailable"
+        ? "*(Some nested content was unavailable.)*"
+        : "";
+  const content = [body, warning].filter(Boolean).join("\n\n");
   return {
     title,
     type: "page",
     url: notionUrl(id),
-    markdown: `# ${title}${body ? `\n\n${body}` : ""}`,
+    markdown: `# ${title}${content ? `\n\n${content}` : ""}`,
   };
 }
 

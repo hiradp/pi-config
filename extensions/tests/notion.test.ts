@@ -6,7 +6,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import { extractToken, invalidateToken, type CommandRunner } from "../notion/auth.ts";
-import { MAX_DATABASE_ROWS, MAX_PAGE_CHUNKS, readNotion, searchNotion } from "../notion/client.ts";
+import {
+  MAX_DATABASE_ROWS,
+  MAX_MISSING_BLOCK_REQUESTS,
+  MAX_PAGE_CHUNKS,
+  readNotion,
+  searchNotion,
+} from "../notion/client.ts";
 import { truncateToolOutput } from "../notion/index.ts";
 import {
   renderBlocks,
@@ -434,6 +440,282 @@ test("sends every request to a fixed endpoint with ids and queries in the body",
       assert.equal(calls[0].url, `${API}search`);
       assert.equal(calls[0].body.query, query);
       assert.equal(calls[0].body.spaceId, "space-1");
+    },
+  );
+});
+
+test("fetches content blocks omitted from page chunks", async () => {
+  const page = block("page", "Nested", { content: ["heading"] });
+  const heading = block("header", "Toggle", {
+    format: { toggleable: true },
+    content: ["body"],
+  });
+  const bodyBlock = block("text", "Body", { content: ["nested"] });
+  const nested = block("bulleted_list", "Deeper");
+
+  await withFetch(
+    ({ endpoint, body }) => {
+      if (endpoint === "loadPageChunk") {
+        return {
+          recordMap: { block: { [PAGE_ID]: stored(page), heading: stored(heading) } },
+          cursor: { stack: [] },
+        };
+      }
+      if (endpoint === "syncRecordValues") {
+        const ids = (body.requests as Array<{ pointer: { id: string } }>).map(
+          (request) => request.pointer.id,
+        );
+        if (ids.includes(PAGE_ID)) {
+          return { recordMap: { block: { [PAGE_ID]: stored(page, "space-1") } } };
+        }
+        if (ids.includes("body")) {
+          return { recordMap: { block: { body: stored(bodyBlock) } } };
+        }
+        if (ids.includes("nested")) {
+          return { recordMap: { block: { nested: stored(nested) } } };
+        }
+      }
+      throw new Error(`unexpected endpoint ${endpoint}`);
+    },
+    async (calls) => {
+      const result = await readNotion(PAGE_ID);
+
+      assert.equal(result.markdown, "# Nested\n\n# Toggle\n\nBody\n\n  - Deeper");
+      const syncedIds = calls
+        .filter((call) => call.endpoint === "syncRecordValues")
+        .map((call) =>
+          (call.body.requests as Array<{ pointer: { id: string } }>).map(
+            (request) => request.pointer.id,
+          ),
+        );
+      assert.deepEqual(syncedIds, [[PAGE_ID], ["body"], ["nested"]]);
+    },
+  );
+});
+
+test("fetches every block the renderer can reach before its depth limit", async () => {
+  const page = block("page", "Deep", { content: ["b0"] });
+  const descendants = Object.fromEntries(
+    Array.from({ length: 7 }, (_, depth) => [
+      `b${depth}`,
+      block("bulleted_list", `L${depth}`, { content: [`b${depth + 1}`] }),
+    ]),
+  );
+
+  await withFetch(
+    ({ endpoint, body }) => {
+      if (endpoint === "loadPageChunk") {
+        return {
+          recordMap: { block: { [PAGE_ID]: stored(page) } },
+          cursor: { stack: [] },
+        };
+      }
+      if (endpoint === "syncRecordValues") {
+        const ids = (body.requests as Array<{ pointer: { id: string } }>).map(
+          (request) => request.pointer.id,
+        );
+        if (ids.includes(PAGE_ID)) {
+          return { recordMap: { block: { [PAGE_ID]: stored(page, "space-1") } } };
+        }
+        return {
+          recordMap: {
+            block: Object.fromEntries(ids.map((id) => [id, stored(descendants[id])])),
+          },
+        };
+      }
+      throw new Error(`unexpected endpoint ${endpoint}`);
+    },
+    async (calls) => {
+      const result = await readNotion(PAGE_ID);
+      const syncedIds = calls
+        .filter((call) => call.endpoint === "syncRecordValues")
+        .slice(1)
+        .map((call) =>
+          (call.body.requests as Array<{ pointer: { id: string } }>).map(
+            (request) => request.pointer.id,
+          ),
+        );
+
+      assert.deepEqual(syncedIds, [["b0"], ["b1"], ["b2"], ["b3"], ["b4"], ["b5"]]);
+      assert.match(result.markdown, /- L5\n {12}\*\(nested content omitted\)\*$/);
+    },
+  );
+});
+
+test("fetches missing synced blocks and their content", async () => {
+  const page = block("page", "Synced", { content: ["reference"] });
+  const reference: NotionBlock = {
+    type: "transclusion_reference",
+    format: { transclusion_reference_pointer: { id: "source", table: "block" } },
+  };
+  const source: NotionBlock = { type: "transclusion_container", content: ["content"] };
+
+  await withFetch(
+    ({ endpoint, body }) => {
+      if (endpoint === "loadPageChunk") {
+        return {
+          recordMap: {
+            block: { [PAGE_ID]: stored(page), reference: stored(reference) },
+          },
+          cursor: { stack: [] },
+        };
+      }
+      if (endpoint === "syncRecordValues") {
+        const ids = (body.requests as Array<{ pointer: { id: string } }>).map(
+          (request) => request.pointer.id,
+        );
+        if (ids.includes(PAGE_ID)) {
+          return { recordMap: { block: { [PAGE_ID]: stored(page, "space-1") } } };
+        }
+        if (ids.includes("source")) {
+          return { recordMap: { block: { source: stored(source) } } };
+        }
+        if (ids.includes("content")) {
+          return { recordMap: { block: { content: stored(block("text", "Inside")) } } };
+        }
+      }
+      throw new Error(`unexpected endpoint ${endpoint}`);
+    },
+    async (calls) => {
+      const result = await readNotion(PAGE_ID);
+
+      assert.equal(result.markdown, "# Synced\n\nInside");
+      const syncedIds = calls
+        .filter((call) => call.endpoint === "syncRecordValues")
+        .map((call) =>
+          (call.body.requests as Array<{ pointer: { id: string } }>).map(
+            (request) => request.pointer.id,
+          ),
+        );
+      assert.deepEqual(syncedIds, [[PAGE_ID], ["source"], ["content"]]);
+    },
+  );
+});
+
+test("does not fetch the content of child pages", async () => {
+  const childId = "11111111-1111-1111-1111-111111111111";
+  const page = block("page", "Root", { content: [childId] });
+  const child = block("page", "Child", { content: ["private-child-content"] });
+
+  await withFetch(
+    ({ endpoint, body }) => {
+      if (endpoint === "loadPageChunk") {
+        return {
+          recordMap: { block: { [PAGE_ID]: stored(page) } },
+          cursor: { stack: [] },
+        };
+      }
+      if (endpoint === "syncRecordValues") {
+        const ids = (body.requests as Array<{ pointer: { id: string } }>).map(
+          (request) => request.pointer.id,
+        );
+        if (ids.includes(PAGE_ID)) {
+          return { recordMap: { block: { [PAGE_ID]: stored(page, "space-1") } } };
+        }
+        if (ids.includes(childId)) {
+          return { recordMap: { block: { [childId]: stored(child) } } };
+        }
+      }
+      throw new Error(`unexpected endpoint ${endpoint}`);
+    },
+    async (calls) => {
+      const result = await readNotion(PAGE_ID);
+      const syncedIds = calls
+        .filter((call) => call.endpoint === "syncRecordValues")
+        .flatMap((call) =>
+          (call.body.requests as Array<{ pointer: { id: string } }>).map(
+            (request) => request.pointer.id,
+          ),
+        );
+
+      assert.equal(
+        result.markdown,
+        `# Root\n\n📄 [Child](https://www.notion.so/${childId.replaceAll("-", "")})`,
+      );
+      assert.deepEqual(syncedIds, [PAGE_ID, childId]);
+    },
+  );
+});
+
+test("bounds missing-block requests and reports omitted content", async () => {
+  const ids = Array.from(
+    { length: MAX_MISSING_BLOCK_REQUESTS * 100 + 1 },
+    (_, index) => `item-${index}`,
+  );
+  const page = block("page", "Wide", { content: ids });
+
+  await withFetch(
+    ({ endpoint, body }) => {
+      if (endpoint === "loadPageChunk") {
+        return {
+          recordMap: { block: { [PAGE_ID]: stored(page) } },
+          cursor: { stack: [] },
+        };
+      }
+      if (endpoint === "syncRecordValues") {
+        const requestedIds = (body.requests as Array<{ pointer: { id: string } }>).map(
+          (request) => request.pointer.id,
+        );
+        if (requestedIds.includes(PAGE_ID)) {
+          return { recordMap: { block: { [PAGE_ID]: stored(page, "space-1") } } };
+        }
+        return {
+          recordMap: {
+            block: Object.fromEntries(
+              requestedIds.map((id) => [id, stored(block("text", id.replace("item-", "Item ")))]),
+            ),
+          },
+        };
+      }
+      throw new Error(`unexpected endpoint ${endpoint}`);
+    },
+    async (calls) => {
+      const result = await readNotion(PAGE_ID);
+      const missingBlockCalls = calls.filter(
+        (call) =>
+          call.endpoint === "syncRecordValues" &&
+          !(call.body.requests as Array<{ pointer: { id: string } }>).some(
+            (request) => request.pointer.id === PAGE_ID,
+          ),
+      );
+
+      assert.equal(missingBlockCalls.length, MAX_MISSING_BLOCK_REQUESTS);
+      assert.doesNotMatch(result.markdown, /\nItem 1000(?:\n|$)/);
+      assert.ok(
+        result.markdown.endsWith(
+          "*(Some nested content was omitted after reaching the Notion read limit.)*",
+        ),
+      );
+    },
+  );
+});
+
+test("does not retry unavailable blocks and reports them", async () => {
+  const page = block("page", "Unavailable", { content: ["missing"] });
+
+  await withFetch(
+    ({ endpoint, body }) => {
+      if (endpoint === "loadPageChunk") {
+        return {
+          recordMap: { block: { [PAGE_ID]: stored(page) } },
+          cursor: { stack: [] },
+        };
+      }
+      if (endpoint === "syncRecordValues") {
+        const ids = (body.requests as Array<{ pointer: { id: string } }>).map(
+          (request) => request.pointer.id,
+        );
+        return ids.includes(PAGE_ID)
+          ? { recordMap: { block: { [PAGE_ID]: stored(page, "space-1") } } }
+          : { recordMap: { block: {} } };
+      }
+      throw new Error(`unexpected endpoint ${endpoint}`);
+    },
+    async (calls) => {
+      const result = await readNotion(PAGE_ID);
+
+      assert.equal(result.markdown, "# Unavailable\n\n*(Some nested content was unavailable.)*");
+      assert.equal(calls.filter((call) => call.endpoint === "syncRecordValues").length, 2);
     },
   );
 });

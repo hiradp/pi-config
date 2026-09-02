@@ -8,7 +8,7 @@ import {
   stringValue,
 } from "./utils.ts";
 
-const MAX_BLOCK_DEPTH = 5;
+export const MAX_BLOCK_DEPTH = 5;
 
 function annotationValue(annotation: unknown[]): unknown {
   return annotation.length > 1 ? annotation[1] : undefined;
