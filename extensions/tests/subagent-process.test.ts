@@ -14,7 +14,23 @@ function runNode(script: string, options: Parameters<typeof runChildProcess>[2])
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-const stubbornScript = 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)';
+/** Ignores SIGTERM and reports readiness as a JSON event once the handler is installed. */
+const stubbornScript =
+  'process.on("SIGTERM", () => {}); process.stdout.write(JSON.stringify({ type: "ready" }) + "\\n"); setInterval(() => {}, 1000)';
+
+function runStubborn(options: Parameters<typeof runChildProcess>[2]) {
+  let markReady: () => void = () => {};
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  const outcome = runNode(stubbornScript, {
+    ...options,
+    onEvent: (event) => {
+      if (event.type === "ready") markReady();
+    },
+  });
+  return { outcome, ready };
+}
 
 test("kills a child that exceeds its wall-clock limit and reports the timeout", async () => {
   const outcome = await runNode(stubbornScript, {
@@ -37,13 +53,13 @@ test("kills a child that exceeds its wall-clock limit and reports the timeout", 
 
 test("registry terminates every live child group on shutdown", async () => {
   const registry = new ChildProcessRegistry();
-  const stubborn = runNode(stubbornScript, { cwd: process.cwd(), registry });
+  const stubborn = runStubborn({ cwd: process.cwd(), registry });
   const polite = runNode("setInterval(() => {}, 1000)", { cwd: process.cwd(), registry });
-  await sleep(150);
   assert.equal(registry.size, 2);
+  await stubborn.ready;
 
   await registry.shutdown(100);
-  const [first, second] = await Promise.all([stubborn, polite]);
+  const [first, second] = await Promise.all([stubborn.outcome, polite]);
 
   assert.equal(first.signal, "SIGKILL");
   assert.equal(second.signal, "SIGTERM");
@@ -68,12 +84,12 @@ test("session shutdown reaps live subagents and exposes a per-child timeout", as
   );
 
   assert.ok(parameters?.properties.timeoutMs);
-  const child = runNode(stubbornScript, { cwd: process.cwd(), registry, killGraceMs: 50 });
-  await sleep(150);
+  const child = runStubborn({ cwd: process.cwd(), registry, killGraceMs: 50 });
   assert.equal(registry.size, 1);
+  await child.ready;
 
   await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" });
-  const outcome = await child;
+  const outcome = await child.outcome;
 
   assert.equal(outcome.signal, "SIGKILL");
   assert.equal(registry.size, 0);
