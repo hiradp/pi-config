@@ -12,7 +12,7 @@ const MAX_ARRAY_ITEMS = 100;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 8;
 const SENSITIVE_KEY = /(?:^|_)(?:access|refresh)?_?token$|authorization|code_verifier/i;
-const SLACK_TOKEN = /\b(?:xoxe\.xox[abp]|xox[abeprs])-[A-Za-z0-9-]+\b/g;
+const SLACK_TOKEN = /\b(?:xoxe\.xox[abp]|xox[abcdeprs]|xapp)-[A-Za-z0-9-]+\b/g;
 
 export interface SlackToolDetails {
   operation: SlackOperation;
@@ -79,7 +79,7 @@ function normalizeResult(result: SlackCallResult): {
 } {
   let source: unknown = result.structuredContent;
   const textParts = result.content.flatMap((item) =>
-    item.type === "text" && typeof item.text === "string" ? [redactTokens(item.text)] : [],
+    item.type === "text" && typeof item.text === "string" ? [redactSlackTokens(item.text)] : [],
   );
   if (source === undefined && textParts.length === 1) {
     try {
@@ -101,7 +101,7 @@ function normalizeResult(result: SlackCallResult): {
 
 function sanitizeValue(value: unknown, depth: number): unknown {
   if (depth >= MAX_DEPTH) return "[nested content omitted]";
-  if (typeof value === "string") return boundString(redactTokens(value));
+  if (typeof value === "string") return boundString(redactSlackTokens(value));
   if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
   if (Array.isArray(value)) {
     const items = value.slice(0, MAX_ARRAY_ITEMS).map((item) => sanitizeValue(item, depth + 1));
@@ -159,7 +159,7 @@ function boundString(value: string): string {
   return `${value.slice(0, end)}… [truncated]`;
 }
 
-function redactTokens(value: string): string {
+export function redactSlackTokens(value: string): string {
   return value.replace(SLACK_TOKEN, "[redacted Slack token]");
 }
 
