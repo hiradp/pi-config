@@ -1,8 +1,14 @@
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { actionMutationTargets, isInside, resolvePathForPolicy } from "../path-policy.ts";
-import { block, type GuardrailPolicy } from "../policy.ts";
+import {
+  analyzeActionMutations,
+  isInside,
+  resolvePathForPolicy,
+  samePath,
+  type MutationTarget,
+} from "../path-policy.ts";
+import { block, confirm, type GuardrailPolicy } from "../policy.ts";
 
 const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -17,12 +23,14 @@ function protectedLocations(): Array<{ path: string; directory: boolean }> {
   }));
 }
 
-function protectedTarget(path: string): string | undefined {
-  const target = resolvePathForPolicy(path) ?? resolve(path);
+function protectedTarget(target: MutationTarget): string | undefined {
+  const path = resolvePathForPolicy(target.path) ?? resolve(target.path);
   for (const location of protectedLocations()) {
-    if (target === location.path || (location.directory && isInside(target, location.path))) {
+    if (samePath(path, location.path) || (location.directory && isInside(path, location.path))) {
       return location.path;
     }
+    // Deleting, moving, or rewriting an ancestor takes the protected location with it.
+    if (target.recursive && isInside(location.path, path)) return location.path;
   }
 }
 
@@ -34,11 +42,17 @@ export const selfProtectionPolicy = {
   },
   async check(action, { cwd, maintenance }) {
     if (maintenance) return;
-    for (const target of actionMutationTargets(action.toolName, action.input, cwd)) {
+    const analysis = analyzeActionMutations(action.toolName, action.input, cwd);
+    for (const target of analysis.targets) {
       const protectedPath = protectedTarget(target);
       if (protectedPath) {
         return block(`Blocked modification of guardrail safety controls at '${protectedPath}'.`);
       }
+    }
+    if (analysis.unresolved.length > 0) {
+      return confirm(
+        `Cannot confirm that '${analysis.unresolved[0]}' leaves guardrail safety controls untouched because the command changes directory to a non-literal path.`,
+      );
     }
   },
 } satisfies GuardrailPolicy;

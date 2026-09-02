@@ -16,7 +16,7 @@ Deterministic blocks can never be overridden by confirmation or semantic review.
 
 Built-in policies:
 
-- **self-protection** — blocks changes to `~/.pi/agent/settings.json` and the guardrails extension source;
+- **self-protection** — blocks changes to `~/.pi/agent/settings.json` and the guardrails extension source, including deleting or moving any ancestor directory and git commands that rewrite the worktree holding them (`checkout`, `stash`, `reset --hard`, `pull`, `apply`, and similar);
 - **system safety** — blocks security weakening, persistence, shell/SSH identity-file changes, dangerous system deletion, and system permission changes;
 - **blocked commands** — blocks configured executables, including package-runner invocations;
 - **default branch** — blocks commits and pushes involving a repository default branch;
@@ -86,7 +86,9 @@ Configuration lives under `guardrails` in `~/.pi/agent/settings.json`:
 }
 ```
 
-Relative path patterns apply only inside the current working tree. Absolute and `~`-prefixed patterns are supported. `*` matches within one path segment; `**` spans directories. Paths are resolved through symlinks where possible.
+Relative path patterns apply only inside the current working tree. Absolute and `~`-prefixed patterns are supported. `*` matches within one path segment; `**` spans directories. Paths are resolved through symlinks and on-disk casing where possible, and matching folds case on macOS and Windows.
+
+Write targets come from shell redirects, common mutating commands (`rm`, `mv`, `cp`, `dd`, `tee`, `sed -i`, and similar), inline interpreter code (`node -e`, `python -c`, `sh -c`), `patch`, `tar` extraction, `rsync`, and worktree-rewriting git commands. A literal `cd` or `pushd` earlier in a command moves later relative paths, including inside subshells; after a non-literal one (variables, substitutions, `cd -`), later relative writes ask for confirmation.
 
 Semantic command entries are executable/argument prefixes. For example, `git push` reviews `git push origin main` but not `git status`; a bare `gh` reviews every `gh` invocation. Common wrappers such as `env`, `sudo`, and `command` are resolved.
 

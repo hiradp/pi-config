@@ -1,4 +1,4 @@
-import { actionMutationTargets, matchesPathPattern } from "../path-policy.ts";
+import { analyzeActionMutations, matchesPathPattern } from "../path-policy.ts";
 import { block, confirm, type GuardrailPolicy } from "../policy.ts";
 
 export const pathsPolicy = {
@@ -14,7 +14,8 @@ export const pathsPolicy = {
     return parts.length > 0 ? `Path guardrail: ${parts.join("; ")}.` : undefined;
   },
   async check(action, { config, cwd }) {
-    for (const target of actionMutationTargets(action.toolName, action.input, cwd)) {
+    const analysis = analyzeActionMutations(action.toolName, action.input, cwd);
+    for (const { path: target } of analysis.targets) {
       const blockedPattern = config.paths.blocked.find((pattern) =>
         matchesPathPattern(target, cwd, pattern),
       );
@@ -29,6 +30,11 @@ export const pathsPolicy = {
           `Modification of '${target}' matched confirmation rule '${confirmPattern}'.`,
         );
       }
+    }
+    if (analysis.unresolved.length > 0) {
+      return confirm(
+        `Cannot resolve '${analysis.unresolved[0]}' because the command changes directory to a non-literal path.`,
+      );
     }
   },
 } satisfies GuardrailPolicy;
