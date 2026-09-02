@@ -7,7 +7,7 @@ import {
   type Component,
   type TUI,
 } from "@earendil-works/pi-tui";
-import { addLocalDays, addTotals, compareUsage, emptyTotals, totalTokens } from "./report.ts";
+import { addLocalDays, addTotals, emptyTotals, totalTokens } from "./report.ts";
 import {
   PERIOD_KEYS,
   TREND_KEYS,
@@ -57,16 +57,10 @@ export function displayRows(period: PeriodUsage): DisplayUsageRow[] {
     { category: "tool", heading: "Tool usage" },
   ];
 
+  // The report already orders models by usage, so each category keeps that order.
   return categories.flatMap(({ category, heading }) => {
     const rows = period.models
       .filter((item) => item.category === category)
-      .sort(
-        (a, b) =>
-          compareUsage(a, b) ||
-          (a.source ?? "").localeCompare(b.source ?? "") ||
-          a.provider.localeCompare(b.provider) ||
-          a.model.localeCompare(b.model),
-      )
       .map((item): DisplayUsageRow => {
         const identity = [item.provider, item.model].filter(Boolean).join(" / ");
         const label = item.source

@@ -30,6 +30,12 @@ interface UsageEvent {
   fingerprint: string;
 }
 
+/** Inclusive bounds of the timestamps a report covers. */
+interface UsageWindow {
+  start: number;
+  end: number;
+}
+
 interface MutablePeriodUsage {
   key: UsagePeriodKey;
   start: number;
@@ -91,6 +97,10 @@ function entryTimestamp(entry: SessionEntry, messageTimestamp?: number): number 
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+function inWindow(timestamp: number, window: UsageWindow): boolean {
+  return timestamp >= window.start && timestamp <= window.end;
+}
+
 function fingerprint(parts: unknown[]): string {
   return createHash("sha256").update(JSON.stringify(parts)).digest("base64url");
 }
@@ -98,6 +108,7 @@ function fingerprint(parts: unknown[]): string {
 function assistantEvent(
   entry: SessionEntry,
   message: Record<string, unknown>,
+  window: UsageWindow,
   source?: string,
 ): UsageEvent | null {
   const usage = normalizeUsage(message.usage as Usage | undefined);
@@ -106,7 +117,8 @@ function assistantEvent(
       ? message.timestamp
       : undefined;
   const timestamp = entryTimestamp(entry, messageTimestamp);
-  if (!usage || timestamp === null) return null;
+  // Fingerprinting hashes the message content, so rule the event out by time before paying for it.
+  if (!usage || timestamp === null || !inWindow(timestamp, window)) return null;
 
   const provider =
     typeof message.provider === "string" && message.provider ? message.provider : "Unknown";
@@ -138,7 +150,7 @@ function assistantEvent(
   };
 }
 
-function porterEvents(entry: SessionEntry): UsageEvent[] {
+function porterEvents(entry: SessionEntry, window: UsageWindow): UsageEvent[] {
   if (entry.type !== "message" || entry.message.role !== "toolResult") return [];
   if (entry.message.toolName !== "porter") return [];
 
@@ -150,25 +162,29 @@ function porterEvents(entry: SessionEntry): UsageEvent[] {
   return messages.flatMap((message) => {
     if (typeof message !== "object" || message === null || !("role" in message)) return [];
     if ((message as { role?: unknown }).role !== "assistant") return [];
-    const event = assistantEvent(entry, message as Record<string, unknown>, "Porter");
+    const event = assistantEvent(entry, message as Record<string, unknown>, window, "Porter");
     return event ? [event] : [];
   });
 }
 
-function eventsFromEntry(entry: SessionEntry): UsageEvent[] {
+function eventsFromEntry(entry: SessionEntry, window: UsageWindow): UsageEvent[] {
   if (entry.type === "message" && entry.message.role === "assistant") {
-    const event = assistantEvent(entry, entry.message as unknown as Record<string, unknown>);
+    const event = assistantEvent(
+      entry,
+      entry.message as unknown as Record<string, unknown>,
+      window,
+    );
     return event ? [event] : [];
   }
 
   if (entry.type === "message" && entry.message.role === "toolResult") {
-    const nestedEvents = porterEvents(entry);
+    const nestedEvents = porterEvents(entry, window);
     if (nestedEvents.length > 0) return nestedEvents;
 
     const message = entry.message;
     const usage = normalizeUsage(message.usage);
     const timestamp = entryTimestamp(entry, message.timestamp);
-    if (!usage || timestamp === null) return [];
+    if (!usage || timestamp === null || !inWindow(timestamp, window)) return [];
 
     return [
       {
@@ -194,7 +210,7 @@ function eventsFromEntry(entry: SessionEntry): UsageEvent[] {
   if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage) {
     const usage = normalizeUsage(entry.usage);
     const timestamp = entryTimestamp(entry);
-    if (!usage || timestamp === null) return [];
+    if (!usage || timestamp === null || !inWindow(timestamp, window)) return [];
 
     return [
       {
@@ -285,6 +301,7 @@ export function compareUsage(a: UsageTotals, b: UsageTotals): number {
   return b.cost - a.cost || totalTokens(b) - totalTokens(a);
 }
 
+/** Orders models for display: the view renders them as-is, split by category. */
 function finalizePeriod(period: MutablePeriodUsage): PeriodUsage {
   const models = [...period.models.values()].sort(
     (a, b) =>
@@ -312,17 +329,19 @@ export function aggregateUsage(
     month: mutablePeriod("month", starts.month),
   };
   const seen = new Set<string>();
-  const earliestStart = Math.min(
-    ...Object.values(starts),
-    ...TREND_KEYS.map((key) => trends[key][0]?.start ?? generatedAt),
-  );
+  const window: UsageWindow = {
+    start: Math.min(
+      ...Object.values(starts),
+      ...TREND_KEYS.map((key) => trends[key][0]?.start ?? generatedAt),
+    ),
+    end: generatedAt,
+  };
   let eventCount = 0;
   let deduplicatedEntries = 0;
 
   for (const entries of sessions) {
     for (const entry of entries) {
-      for (const event of eventsFromEntry(entry)) {
-        if (event.timestamp > generatedAt || event.timestamp < earliestStart) continue;
+      for (const event of eventsFromEntry(entry, window)) {
         if (seen.has(event.fingerprint)) {
           deduplicatedEntries++;
           continue;
@@ -360,6 +379,8 @@ export function aggregateUsage(
 
 export async function loadUsageReport(options: LoadUsageOptions = {}): Promise<UsageReport> {
   const { currentSessionFile, currentEntries, now = new Date(), signal } = options;
+  // listAll() already streams every session file, but it keeps only metadata (id, cwd, name,
+  // timestamps, message text) and discards the entries, so each file is read again here.
   const sessionInfos = await SessionManager.listAll();
   signal?.throwIfAborted();
 
