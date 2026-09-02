@@ -3,12 +3,14 @@
  *
  * The phrase rotates every 20 seconds while a themed shimmer moves across it.
  * The working row shows elapsed time, received output tokens, and the duration
- * of the latest thinking block. Completed durations and the wall-clock time the
- * agent finished are stored in the session and rendered beneath each response.
+ * of the latest thinking block. Completed durations, the wall-clock time the
+ * agent finished, and whether the run completed, was stopped, or failed are
+ * stored in the session and rendered beneath each response.
  */
 
 import { performance } from "node:perf_hooks";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { StopReason } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
 const SHIMMER_INTERVAL_MS = 100;
@@ -16,9 +18,26 @@ const SHIMMER_WIDTH = 3;
 const WORKING_PHRASE_INTERVAL_MS = 20_000;
 const TURN_PROGRESS_ENTRY = "working-message";
 
+type TurnOutcome = "done" | "aborted" | "failed";
+
 interface TurnProgressEntryData {
   durationMs: number;
   completedAtMs?: number;
+  /** Absent in entries written before outcomes were recorded; those render as done. */
+  outcome?: TurnOutcome;
+}
+
+const OUTCOME_STYLES: Record<TurnOutcome, { glyph: string; color: ThemeColor; verb: string }> = {
+  done: { glyph: "✓", color: "success", verb: "Done in" },
+  aborted: { glyph: "■", color: "warning", verb: "Stopped after" },
+  failed: { glyph: "✗", color: "error", verb: "Failed after" },
+};
+
+/** The run's outcome is that of its final assistant message, so a retried error still counts as done. */
+function turnOutcome(stopReason: StopReason | null): TurnOutcome {
+  if (stopReason === "aborted") return "aborted";
+  if (stopReason === "error") return "failed";
+  return "done";
 }
 
 const WORKING_PHRASES = [
@@ -143,19 +162,21 @@ export default function (pi: ExtensionAPI) {
   let streamingOutputTokens = 0;
   let thoughtStartedAt: number | null = null;
   let lastThoughtDurationMs: number | null = null;
+  let lastStopReason: StopReason | null = null;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
 
   pi.registerEntryRenderer<TurnProgressEntryData>(TURN_PROGRESS_ENTRY, (entry, _options, theme) => {
     if (!entry.data) return;
 
+    const { glyph, color, verb } = OUTCOME_STYLES[entry.data.outcome ?? "done"];
     const elapsed = formatDuration(entry.data.durationMs);
     const doneAt =
       entry.data.completedAtMs !== undefined
         ? ` at ${formatTimeOfDay(entry.data.completedAtMs)}`
         : "";
-    const check = theme.fg("success", "✓");
-    const message = theme.fg("dim", `Done in ${elapsed}${doneAt}`);
-    return new Text(`${check} ${message}`, 0, 0);
+    const mark = theme.fg(color, glyph);
+    const message = theme.fg("dim", `${verb} ${elapsed}${doneAt}`);
+    return new Text(`${mark} ${message}`, 0, 0);
   });
 
   const stopWorkingTimer = () => {
@@ -169,6 +190,7 @@ export default function (pi: ExtensionAPI) {
     streamingOutputTokens = 0;
     thoughtStartedAt = null;
     lastThoughtDurationMs = null;
+    lastStopReason = null;
   };
 
   pi.on("before_agent_start", (_event, ctx) => {
@@ -229,6 +251,7 @@ export default function (pi: ExtensionAPI) {
     streamingOutputTokens = event.message.usage.output;
     completedOutputTokens += streamingOutputTokens;
     streamingOutputTokens = 0;
+    lastStopReason = event.message.stopReason;
 
     if (thoughtStartedAt !== null) {
       lastThoughtDurationMs = performance.now() - thoughtStartedAt;
@@ -236,8 +259,11 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // agent_settled fires for every outcome and carries none, so the outcome comes from the
+  // stop reason of the last assistant message seen in message_end.
   pi.on("agent_settled", (_event, ctx) => {
     const durationMs = requestStartedAt !== null ? performance.now() - requestStartedAt : null;
+    const outcome = turnOutcome(lastStopReason);
 
     stopWorkingTimer();
     if (ctx.mode !== "tui") return;
@@ -247,6 +273,7 @@ export default function (pi: ExtensionAPI) {
       pi.appendEntry<TurnProgressEntryData>(TURN_PROGRESS_ENTRY, {
         durationMs,
         completedAtMs: Date.now(),
+        outcome,
       });
     }
   });
