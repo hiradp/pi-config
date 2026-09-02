@@ -5,7 +5,7 @@ description: Remove AI-generated slop from code changes. Use when the user says 
 
 # Deslop
 
-Check the diff against main and remove all AI-generated comment slop introduced in this branch.
+Select the task's comparison target deliberately, then remove AI-generated comment slop only from the verified task scope.
 
 ## What to remove
 
@@ -41,7 +41,9 @@ If the *pre-existing* code already uses section headers in this style, leave the
 
 ## Process
 
-1. Get the diff: `git diff main`
-2. For each changed file, read the full file to understand existing comment style and density
-3. Remove slop comments from the branch's changes only — do not touch pre-existing code
-4. Report a 1-3 sentence summary of what was changed
+1. Determine the intended comparison before editing. Prefer an explicit user-provided base or range, then the PR target or stacked branch's parent, then the repository's default branch (from remote or forge metadata). Do not assume `main`; ask when plausible targets would materially change the scope.
+2. Inspect the committed task diff. Use the explicit range as given, or `git diff <target>...HEAD` for a branch target so the comparison starts at the merge base.
+3. Run `git status --short`, inspect relevant staged and unstaged diffs with `git diff --cached` and `git diff`, and inspect relevant untracked files. Distinguish task changes from unrelated or user-authored local work.
+4. For each task-scoped changed file, read the full file to understand its existing comment style and density.
+5. Remove slop comments only from verified task changes. Do not alter pre-existing comments, unrelated hunks, or local work whose ownership is uncertain.
+6. Report a 1-3 sentence summary of what was changed.
