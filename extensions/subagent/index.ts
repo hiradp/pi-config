@@ -50,6 +50,7 @@ const MODEL_VISIBLE_OUTPUT_CAP = 50 * 1024;
 const MODEL_VISIBLE_OUTPUT_LINES = 2000;
 const KILL_GRACE_MS = 5000;
 const MAX_STDERR_BYTES = 64 * 1024;
+const DEFAULT_CHILD_TIMEOUT_MS = 45 * 60 * 1000;
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -285,7 +286,15 @@ export function classifyChildExit(
   code: number | null,
   signal: NodeJS.Signals | null,
   wasAborted: boolean,
-): { exitCode: number; stopReason?: "aborted"; errorMessage?: string } {
+  timeoutMs?: number,
+): { exitCode: number; stopReason?: "aborted" | "timeout"; errorMessage?: string } {
+  if (timeoutMs !== undefined) {
+    return {
+      exitCode: code || 1,
+      stopReason: "timeout",
+      errorMessage: `Subagent timed out after ${formatElapsed(timeoutMs)}${signal ? ` (${signal})` : ""}`,
+    };
+  }
   if (wasAborted) {
     return {
       exitCode: code ?? 1,
@@ -752,12 +761,60 @@ export function resolveDispatchConfig(
   };
 }
 
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref?.();
+  });
+}
+
+function trySignalTree(pid: number, signal: NodeJS.Signals): void {
+  try {
+    signalProcessTree(pid, signal);
+  } catch {
+    // The group is already gone or belongs to someone else; nothing left to reap.
+  }
+}
+
+/** Live child process groups, so a session shutdown can reap them. */
+export class ChildProcessRegistry {
+  private readonly children = new Map<number, Promise<void>>();
+  private readonly graceMs: number;
+
+  constructor(graceMs = KILL_GRACE_MS) {
+    this.graceMs = graceMs;
+  }
+
+  add(pid: number, closed: Promise<void>): void {
+    this.children.set(pid, closed);
+    void closed.then(() => this.children.delete(pid));
+  }
+
+  get size(): number {
+    return this.children.size;
+  }
+
+  /** SIGTERM every live group, then SIGKILL whatever is still running after the grace period. */
+  async shutdown(graceMs = this.graceMs): Promise<void> {
+    const pending = [...this.children.entries()];
+    if (pending.length === 0) return;
+    const closed = Promise.all(pending.map(([, promise]) => promise)).then(() => undefined);
+    for (const [pid] of pending) trySignalTree(pid, "SIGTERM");
+    await Promise.race([closed, sleep(graceMs)]);
+    for (const [pid] of pending) if (this.children.has(pid)) trySignalTree(pid, "SIGKILL");
+    await Promise.race([closed, sleep(graceMs)]);
+  }
+}
+
 export interface ChildProcessOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Wall-clock limit; the group is terminated and the outcome marked `timedOut` when it elapses. */
+  timeoutMs?: number;
   killGraceMs?: number;
   maxStderrBytes?: number;
+  registry?: ChildProcessRegistry;
   /** Receives every JSON event line the child writes to stdout. */
   onEvent?: (event: any) => void;
   /** Signals a process group; defaults to `signalProcessTree`. */
@@ -768,6 +825,7 @@ export interface ChildProcessOutcome {
   code: number | null;
   signal: NodeJS.Signals | null;
   aborted: boolean;
+  timedOut: boolean;
   stderr: string;
   stderrTruncated: boolean;
   spawnError?: string;
@@ -810,21 +868,30 @@ export function runChildProcess(
     let stderr = "";
     let stderrTruncated = false;
     let aborted = false;
+    let timedOut = false;
     let spawnError: string | undefined;
     let signalError: string | undefined;
     let processClosed = false;
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     let abortHandler: (() => void) | undefined;
+    let markClosed: () => void = () => {};
+    const closed = new Promise<void>((resolveClosed) => {
+      markClosed = resolveClosed;
+    });
 
     const finish = (code: number | null, closeSignal: NodeJS.Signals | null) => {
       if (processClosed) return;
       processClosed = true;
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       if (options.signal && abortHandler) options.signal.removeEventListener("abort", abortHandler);
+      markClosed();
       resolve({
         code,
         signal: closeSignal,
         aborted,
+        timedOut,
         stderr,
         stderrTruncated,
         spawnError,
@@ -891,6 +958,16 @@ export function runChildProcess(
       finish(1, null);
     });
 
+    if (proc.pid !== undefined && options.registry) options.registry.add(proc.pid, closed);
+
+    if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        if (processClosed) return;
+        timedOut = true;
+        terminate();
+      }, options.timeoutMs);
+    }
+
     if (options.signal) {
       abortHandler = () => {
         if (aborted) return;
@@ -901,6 +978,11 @@ export function runChildProcess(
       else options.signal.addEventListener("abort", abortHandler, { once: true });
     }
   });
+}
+
+interface ChildRunOptions {
+  timeoutMs: number;
+  registry: ChildProcessRegistry;
 }
 
 async function runSingleAgent(
@@ -916,6 +998,7 @@ async function runSingleAgent(
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
+  runOptions: ChildRunOptions,
 ): Promise<SingleResult> {
   const agent = agents.find((a) => a.name === agentName);
   const dispatchConfig = resolveDispatchConfig(agent?.model, invocationModel, dispatchDefaults);
@@ -1000,6 +1083,8 @@ async function runSingleAgent(
     const outcome = await runChildProcess(invocation.command, invocation.args, {
       cwd: cwd ?? defaultCwd,
       signal,
+      timeoutMs: runOptions.timeoutMs,
+      registry: runOptions.registry,
       onEvent: (event) => {
         if (event.type === "message_end" && event.message) {
           const msg = event.message as Message;
@@ -1032,7 +1117,12 @@ async function runSingleAgent(
     if (outcome.spawnError) {
       currentResult.errorMessage = `Failed to start subagent: ${outcome.spawnError}`;
     }
-    const status = classifyChildExit(outcome.code, outcome.signal, outcome.aborted);
+    const status = classifyChildExit(
+      outcome.code,
+      outcome.signal,
+      outcome.aborted,
+      outcome.timedOut ? runOptions.timeoutMs : undefined,
+    );
     currentResult.exitCode = status.exitCode;
     if (status.stopReason) currentResult.stopReason = status.stopReason;
     if (status.errorMessage) currentResult.errorMessage = status.errorMessage;
@@ -1124,9 +1214,21 @@ const SubagentParams = Type.Object({
   cwd: Type.Optional(
     Type.String({ description: "Working directory for the agent process (single mode)" }),
   ),
+  timeoutMs: Type.Optional(
+    Type.Integer({
+      minimum: 1000,
+      description: `Wall-clock limit per child in milliseconds. Default: ${DEFAULT_CHILD_TIMEOUT_MS} (45 minutes).`,
+    }),
+  ),
 });
 
-export default function (pi: ExtensionAPI) {
+export default function (
+  pi: ExtensionAPI,
+  registry: ChildProcessRegistry = new ChildProcessRegistry(),
+) {
+  pi.on("session_shutdown", async () => {
+    await registry.shutdown();
+  });
   pi.on("tool_result", (event) => {
     if (event.toolName !== "subagent" || !hasFailedSubagentResult(event.details)) return;
     return { isError: true };
@@ -1154,6 +1256,10 @@ export default function (pi: ExtensionAPI) {
       const discovery = discoverAgents(ctx.cwd, agentScope);
       const agents = discovery.agents;
       const confirmProjectAgents = params.confirmProjectAgents ?? true;
+      const runOptions: ChildRunOptions = {
+        timeoutMs: params.timeoutMs ?? DEFAULT_CHILD_TIMEOUT_MS,
+        registry,
+      };
 
       const hasChain = (params.chain?.length ?? 0) > 0;
       const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -1263,6 +1369,7 @@ export default function (pi: ExtensionAPI) {
             signal,
             chainUpdate,
             makeDetails("chain"),
+            runOptions,
           );
           result.task = step.task;
           result.label = step.label;
@@ -1366,6 +1473,7 @@ export default function (pi: ExtensionAPI) {
                 }
               },
               makeDetails("parallel"),
+              runOptions,
             );
             allResults[index] = result;
             emitParallelUpdate();
@@ -1407,6 +1515,7 @@ export default function (pi: ExtensionAPI) {
           signal,
           onUpdate,
           makeDetails("single"),
+          runOptions,
         );
         const isError = isFailedResult(result);
         if (isError) {

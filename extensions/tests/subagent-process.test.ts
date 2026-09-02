@@ -1,12 +1,82 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runChildProcess, signalProcessTree } from "../subagent/index.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import registerSubagent, {
+  ChildProcessRegistry,
+  classifyChildExit,
+  runChildProcess,
+  signalProcessTree,
+} from "../subagent/index.ts";
 
 function runNode(script: string, options: Parameters<typeof runChildProcess>[2]) {
   return runChildProcess(process.execPath, ["-e", script], options);
 }
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const stubbornScript = 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)';
+
+test("kills a child that exceeds its wall-clock limit and reports the timeout", async () => {
+  const outcome = await runNode(stubbornScript, {
+    cwd: process.cwd(),
+    timeoutMs: 100,
+    killGraceMs: 20,
+  });
+
+  assert.equal(outcome.timedOut, true);
+  assert.equal(outcome.aborted, false);
+  assert.equal(outcome.signal, "SIGKILL");
+
+  const status = classifyChildExit(outcome.code, outcome.signal, false, 2_700_000);
+  assert.equal(status.exitCode, 1);
+  assert.equal(status.stopReason, "timeout");
+  assert.match(status.errorMessage ?? "", /timed out after 45m 00s/);
+  assert.equal(classifyChildExit(0, null, false, 2_700_000).exitCode, 1);
+});
+
+test("registry terminates every live child group on shutdown", async () => {
+  const registry = new ChildProcessRegistry();
+  const stubborn = runNode(stubbornScript, { cwd: process.cwd(), registry });
+  const polite = runNode("setInterval(() => {}, 1000)", { cwd: process.cwd(), registry });
+  await sleep(150);
+  assert.equal(registry.size, 2);
+
+  await registry.shutdown(100);
+  const [first, second] = await Promise.all([stubborn, polite]);
+
+  assert.equal(first.signal, "SIGKILL");
+  assert.equal(second.signal, "SIGTERM");
+  assert.equal(registry.size, 0);
+});
+
+test("session shutdown reaps live subagents and exposes a per-child timeout", async () => {
+  const registry = new ChildProcessRegistry(50);
+  const handlers = new Map<string, (event: unknown) => unknown>();
+  let parameters: { properties: Record<string, unknown> } | undefined;
+  registerSubagent(
+    {
+      on(event: string, handler: (event: unknown) => unknown) {
+        handlers.set(event, handler);
+      },
+      registerTool(definition: { parameters: { properties: Record<string, unknown> } }) {
+        parameters = definition.parameters;
+      },
+    } as unknown as ExtensionAPI,
+    undefined,
+    registry,
+  );
+
+  assert.ok(parameters?.properties.timeoutMs);
+  const child = runNode(stubbornScript, { cwd: process.cwd(), registry, killGraceMs: 50 });
+  await sleep(150);
+  assert.equal(registry.size, 1);
+
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" });
+  const outcome = await child;
+
+  assert.equal(outcome.signal, "SIGKILL");
+  assert.equal(registry.size, 0);
+});
 
 test(
   "stops escalating once an aborted child exits and reports signal failures",
