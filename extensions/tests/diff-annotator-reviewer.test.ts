@@ -137,8 +137,8 @@ test("counts reach absolute lines and accept zero digits", () => {
   assert.equal(textAtCursor(), "l3", "7G goes to buffer line 7");
   press(component, "G");
   assert.equal(textAtCursor(), "added", "G alone goes to the end");
-  press(component, "5", "g", "g");
-  assert.equal(textAtCursor(), "l1", "5gg goes to buffer line 5");
+  press(component, "7", "g", "g");
+  assert.equal(textAtCursor(), "l3", "7gg goes to buffer line 7");
   press(component, "j", "g", "g");
   assert.equal(textAtCursor(), "l1", "gg alone goes to the start");
 });
@@ -149,10 +149,8 @@ test("[c and ]c move between changed blocks", () => {
   const component = makeComponent(parsed.files, parsed, [], () => {});
   const textAtCursor = () => parsed.lines[cursorOf(component)]!.text;
 
-  press(component, "]", "c");
-  assert.equal(textAtCursor(), "b");
-  press(component, "]", "c");
-  assert.equal(textAtCursor(), "e", "]c skips to the next block, not the next changed line");
+  press(component, "2", "]", "c");
+  assert.equal(textAtCursor(), "e", "counts apply to multi-key motions");
   press(component, "]", "c");
   assert.equal(textAtCursor(), "e", "no block follows");
   press(component, "j");

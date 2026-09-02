@@ -181,6 +181,8 @@ export class DiffReviewerComponent implements Component, Focusable {
   private ordinals: Map<number, number> | null = null;
   private pending = "";
   private pendingAt = 0;
+  private pendingCount = 1;
+  private pendingHasCount = false;
   private status = "";
   private cachedWidth = -1;
   private cachedHeight = -1;
@@ -375,6 +377,15 @@ export class DiffReviewerComponent implements Component, Focusable {
   private clearPending(): void {
     this.pending = "";
     this.pendingAt = 0;
+    this.pendingCount = 1;
+    this.pendingHasCount = false;
+  }
+
+  private setPending(key: string, count: number, hasCount: boolean): void {
+    this.pending = key;
+    this.pendingAt = Date.now();
+    this.pendingCount = count;
+    this.pendingHasCount = hasCount;
   }
 
   private lineAtCursor(): ReviewLine | undefined {
@@ -790,10 +801,12 @@ export class DiffReviewerComponent implements Component, Focusable {
       return;
     }
 
-    const hasCount = this.countBuffer !== "";
-    const count = this.consumeCount();
+    const inputHasCount = this.countBuffer !== "";
+    const inputCount = this.consumeCount();
     const pendingKey =
       this.pending && Date.now() - this.pendingAt <= PENDING_TIMEOUT_MS ? this.pending : "";
+    const hasCount = pendingKey ? this.pendingHasCount : inputHasCount;
+    const count = pendingKey ? this.pendingCount : inputCount;
     this.clearPending();
 
     if (pendingKey === "g" && data === "g") {
@@ -876,26 +889,18 @@ export class DiffReviewerComponent implements Component, Focusable {
           // A refused selection stays active so it can be adjusted.
           if (this.finishVisualComment()) this.visual = null;
         } else {
-          this.pending = "c";
-          this.pendingAt = Date.now();
+          this.setPending("c", count, hasCount);
         }
         break;
       case "C":
         this.openFileComment();
         break;
       case "d":
-        this.pending = "d";
-        this.pendingAt = Date.now();
-        break;
       case "g":
-        this.pending = "g";
-        this.pendingAt = Date.now();
-        break;
       case "[":
       case "]":
       case ",":
-        this.pending = data;
-        this.pendingAt = Date.now();
+        this.setPending(data, count, hasCount);
         break;
       case ":":
         this.enterCommand();
@@ -1137,12 +1142,8 @@ export class DiffReviewerComponent implements Component, Focusable {
     const pending =
       this.pending && Date.now() - this.pendingAt <= PENDING_TIMEOUT_MS ? this.pending : "";
     if (pending) {
-      return truncateToWidth(
-        this.theme.fg("muted", ` ${pending}${this.countBuffer}`),
-        width,
-        "",
-        true,
-      );
+      const count = this.pendingHasCount ? String(this.pendingCount) : "";
+      return truncateToWidth(this.theme.fg("muted", ` ${count}${pending}`), width, "", true);
     }
 
     if (this.mode === "command") {
