@@ -46,7 +46,6 @@ function captureTool(invocation?: Invocation): { execute: Execute; parameters: S
       },
     } as unknown as ExtensionAPI,
     undefined,
-    undefined,
     invocation,
   );
   assert.ok(execute);

@@ -79,7 +79,6 @@ test("session shutdown reaps live subagents and exposes a per-child timeout", as
         parameters = definition.parameters;
       },
     } as unknown as ExtensionAPI,
-    undefined,
     registry,
   );
 
