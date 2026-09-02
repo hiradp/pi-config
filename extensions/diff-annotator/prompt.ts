@@ -71,6 +71,16 @@ function formatLineRange(
   return `new line${newStart === newEnd ? "" : "s"} ${newRange}`;
 }
 
+// A fence must be longer than any backtick run in the content, otherwise a
+// context line of three backticks inside the selection ends the block early.
+function codeFence(lines: string[]): string {
+  let longest = 0;
+  for (const line of lines) {
+    for (const run of line.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  }
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 function commentSortKey(
   snapshot: ReviewSnapshot,
   comment: ReviewComment,
@@ -160,12 +170,13 @@ export function composeReviewPrompt(input: ComposePromptInput): string {
     if (range.hunk) lines.push(`Hunk: ${range.hunk}`);
     lines.push("");
     lines.push("Selected code:");
-    lines.push("```diff");
+    const fence = codeFence(range.lines.map((line) => line.text));
+    lines.push(`${fence}diff`);
     for (const line of range.lines) {
       const prefix = line.kind === "addition" ? "+" : line.kind === "removal" ? "-" : " ";
       lines.push(`${prefix}${line.text}`);
     }
-    lines.push("```");
+    lines.push(fence);
     lines.push("");
     lines.push("Comment:");
     lines.push(comment.body.trim());

@@ -76,6 +76,16 @@ interface TextRange {
 }
 
 const MIN_PAIR_SIMILARITY = 0.45;
+// diffWords is quadratic in the number of differing tokens: a pair of
+// generated or minified lines a few tens of kilobytes long stalls the first
+// render for minutes, so long pairs keep plain add/remove colouring.
+const MAX_INTRA_LINE_CHARS = 2048;
+
+// pi-tui renders a tab as three columns. Expanding up front keeps intra-line
+// ranges, syntax highlighting, and the displayed text in one coordinate space.
+export function expandTabs(text: string): string {
+  return text.replaceAll("\t", "   ");
+}
 
 function groupChangeRuns(lines: ReviewLine[]): ReviewLine[][] {
   const runs: ReviewLine[][] = [];
@@ -115,12 +125,17 @@ function buildIntraLineRanges(lines: ReviewLine[]): Map<number, TextRange[]> {
     for (let index = 0; index < pairs; index += 1) {
       const oldLine = removed[index]!;
       const newLine = added[index]!;
-      const parts = diffWords(oldLine.text, newLine.text);
+      const oldText = expandTabs(oldLine.text);
+      const newText = expandTabs(newLine.text);
+      if (oldText.length > MAX_INTRA_LINE_CHARS || newText.length > MAX_INTRA_LINE_CHARS) {
+        continue;
+      }
+      const parts = diffWords(oldText, newText);
       const commonLength = parts.reduce(
         (sum, part) => (part.added || part.removed ? sum : sum + part.value.trim().length),
         0,
       );
-      if (pairSimilarity(oldLine.text, newLine.text, commonLength) < MIN_PAIR_SIMILARITY) {
+      if (pairSimilarity(oldText, newText, commonLength) < MIN_PAIR_SIMILARITY) {
         continue;
       }
 
@@ -233,7 +248,10 @@ export function createDiffStyler(files: ReviewFile[], theme: DiffStyleTheme): Di
       if (contentLines.length === 0) continue;
 
       try {
-        const highlighted = highlightCode(contentLines.map((line) => line.text).join("\n"), lang);
+        const highlighted = highlightCode(
+          contentLines.map((line) => expandTabs(line.text)).join("\n"),
+          lang,
+        );
         contentLines.forEach((line, index) => {
           if (highlighted[index] !== undefined) map.set(line.id, highlighted[index]!);
         });
@@ -248,24 +266,25 @@ export function createDiffStyler(files: ReviewFile[], theme: DiffStyleTheme): Di
 
   return {
     styleText(line, text, opts = {}) {
+      const source = expandTabs(text);
       const file = files[line.fileIndex];
-      if (!file) return text;
+      if (!file) return source;
 
-      if (line.kind === "hunk") return theme.fg("accent", text);
+      if (line.kind === "hunk") return theme.fg("accent", source);
       if (line.kind === "meta" || line.kind === "no-newline" || line.kind === "file") {
-        return theme.fg("dim", text);
+        return theme.fg("dim", source);
       }
 
       const highlighted = syntaxLines(file, line.fileIndex).get(line.id);
 
       if (line.kind === "addition" || line.kind === "removal") {
         const ranges = intraLineRanges(file, line.fileIndex).get(line.id) ?? [];
-        const body = applyInverseRanges(highlighted ?? text, ranges);
+        const body = applyInverseRanges(highlighted ?? source, ranges);
         if (opts.selected) return body;
         return theme.bg(line.kind === "addition" ? "toolSuccessBg" : "toolErrorBg", body);
       }
 
-      if (highlighted === undefined) return theme.fg("toolDiffContext", text);
+      if (highlighted === undefined) return theme.fg("toolDiffContext", source);
       return highlighted;
     },
 
