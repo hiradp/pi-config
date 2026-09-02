@@ -36,7 +36,9 @@ test("formats the time of day in 12-hour clock", () => {
   assert.equal(formatTimeOfDay(new Date(2025, 0, 15, 12, 0).getTime()), "12:00 PM");
 });
 
-test("persists the completed working message in the session transcript", () => {
+test("persists the completed working message in the session transcript", (t) => {
+  const setIntervalMock = t.mock.method(globalThis, "setInterval");
+  const clearIntervalMock = t.mock.method(globalThis, "clearInterval");
   const handlers = new Map<string, Handler>();
   const entries: AppendedEntry[] = [];
   const workingMessages: Array<string | undefined> = [];
@@ -80,6 +82,12 @@ test("persists the completed working message in the session transcript", () => {
   assert.equal(entries[0]?.customType, "working-message");
   assert.match(workingMessages[0] ?? "", /… \(0s\)$/);
   assert.equal(workingMessages.at(-1), undefined);
+  assert.equal(clearIntervalMock.mock.calls.length, 1);
+  assert.equal(
+    clearIntervalMock.mock.calls[0]?.arguments[0],
+    setIntervalMock.mock.calls[0]?.result,
+    "the working timer is cleared when the agent settles",
+  );
 
   const data = entries[0]?.data as { durationMs: number; completedAtMs?: number };
   assert.ok(data.durationMs >= 0);
