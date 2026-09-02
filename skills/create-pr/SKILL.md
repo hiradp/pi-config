@@ -9,7 +9,7 @@ Create one focused pull request from the current repository while preserving the
 
 ## Intent and authorization
 
-- Treat an explicit request to **open** or **create** a PR as authorization for a normal push of the current task's non-default feature branch, if needed, followed by one `gh pr create`. Guardrails and repository rules still apply.
+- Treat an explicit request to **open** or **create** a PR as authorization for a normal push of the current task's non-default feature branch, if needed, followed by one `gh pr create`. This authorization remains valid when implementation is delegated; the interactive parent must not require the user to repeat it after workers return. Guardrails and repository rules still apply.
 - A request to **prepare** or **draft a description** is local-only unless the user explicitly asks to publish it.
 - Honor read-only constraints such as "don't post", "review only", or "don't push".
 - PR creation does **not** authorize force-pushing, merging, closing or reopening PRs, commenting, editing unrelated PRs, changing branch protection, deploying, or publishing releases.
@@ -39,9 +39,10 @@ Load and follow the `high-risk-completion` skill when a defect in the change cou
 
 - An implementation or PR request does not authorize `/review-code` or reviewer subagents.
 - A high-risk change without a current successful independent review is not review-ready or merge-ready, even when checks pass and GitHub reports it as conflict-free.
-- When the user requests a PR without specifying draft or ready status, publish an unreviewed high-risk change as a draft and report that independent review is pending.
+- When the user requests a PR without specifying draft or ready status, publish an unreviewed high-risk change as a draft and report that independent review is pending. Do not withhold the requested draft merely to request `/review-code` first.
 - If the user explicitly requests a ready PR before review, explain the missing gate and ask whether to publish a draft or intentionally bypass it.
 - Do not mark an existing draft ready until the gate passes or the user explicitly confirms an override.
+- Review findings returned by a reviewer tool remain unresolved even if a queued user message arrived before the parent synthesized them. If confirmed findings have not yet been surfaced to the user, report them and stop before any push or PR mutation. After they have been surfaced, an explicitly requested PR may be published only as a draft while they remain unresolved.
 
 ## Title and description
 
@@ -81,7 +82,9 @@ Add another section only when it contains relevant, non-routine information.
 
 If GitHub is unavailable or verification fails, preserve the local state, avoid repeated mutation attempts, and report what succeeded, what remains uncertain, and the exact safe next step.
 
-When an explicitly authorized publication was delegated, a worker may be unable to display a confirmation requested by the semantic guardrail. Treat that as an interaction-context blocker, not as a failed code review or evidence that `/review-code` is required. After verifying the worker's branch, commit, diff, checks, and clean state, resume the same push and PR creation from the interactive parent so the guardrail can request confirmation there. Do not bypass the guardrail, repeat the denied command in the worker, or change a required draft into a ready PR.
+Publication may be delegated to a worker only under the bounded policy in the `subagent-routing` skill. Include an explicit `Publication authorization:` line with the repository and allowed branch or pattern; do not assume the worker inherits authorization from the parent conversation. A delegated worker may normally push an eligible non-default branch, create a draft PR, update the title/body of an existing PR whose head matches that branch, or convert it to draft. It may not force-push, push a default branch, mark a PR ready, merge, close, reopen, or mutate unrelated PR metadata.
+
+If an authorized worker publication is blocked because no confirmation UI is available, treat that as an interaction-context blocker. Verify the worker's branch, commit, diff, checks, and clean state, then resume the same action from the interactive parent without asking the user to repeat the request or prescribing `/review-code` as the remedy. Do not bypass the guardrail or change a required draft into a ready PR.
 
 ## Final response
 

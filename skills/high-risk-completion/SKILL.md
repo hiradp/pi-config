@@ -36,7 +36,7 @@ Tests, CI, linters, snapshots, self-review in the implementation context, and Gi
 
 If review has not been requested, finish implementation, checks, and any explicitly requested draft PR publication, then tell the user that independent review remains before readiness. Do not invoke `/review-code` autonomously. This is a readiness gate, not a reason to withhold a draft PR that the user requested.
 
-If review dispatch is incomplete or unusable, fail closed under the subagent-routing skill. If review finds defects, report them and stop. Fixing findings does not authorize re-review; ask the user to invoke `/review-code` again after fixes.
+If review dispatch is incomplete or unusable, fail closed under the subagent-routing skill. If review finds defects, report them and stop. Reviewer tool results count immediately: a queued user message does not supersede them, and unpublished findings must be surfaced before handling a later publication request. Fixing findings does not authorize re-review; ask the user to invoke `/review-code` again after fixes.
 
 ## Use precise readiness language
 
