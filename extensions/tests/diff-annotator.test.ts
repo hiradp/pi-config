@@ -6,109 +6,22 @@ import { test } from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
-import { captureReviewSnapshot, type RunGitLike } from "../diff-annotator/git.ts";
+import { captureReviewSnapshot } from "../diff-annotator/git.ts";
 import { parseReviewSnapshot } from "../diff-annotator/parser.ts";
 import { composeReviewPrompt } from "../diff-annotator/prompt.ts";
-import { createDiffStyler, type DiffStyleTheme } from "../diff-annotator/render.ts";
+import { createDiffStyler } from "../diff-annotator/render.ts";
 import { DiffReviewerComponent } from "../diff-annotator/reviewer.ts";
-import type { ReviewComment, ReviewFile, ReviewSnapshot } from "../diff-annotator/types.ts";
+import type { ReviewComment } from "../diff-annotator/types.ts";
+import {
+  gitCommit,
+  makeComponent,
+  parse,
+  realGit,
+  snapshot,
+  testTheme,
+} from "./diff-annotator-helpers.ts";
 
 const execFileAsync = promisify(execFile);
-
-const realGit: RunGitLike = {
-  async exec(command, args, options) {
-    try {
-      const result = await execFileAsync(command, args, {
-        cwd: options?.cwd,
-        timeout: options?.timeout,
-      });
-      return { code: 0, stdout: result.stdout, stderr: result.stderr };
-    } catch (error) {
-      const failed = error as { code?: number; stdout?: string; stderr?: string };
-      return {
-        code: failed.code ?? 1,
-        stdout: failed.stdout ?? "",
-        stderr: failed.stderr ?? String(error),
-      };
-    }
-  },
-};
-
-function baseFilePatch(path = "src/example.ts"): string {
-  return [
-    `diff --git a/${path} b/${path}`,
-    "index 1111111..2222222 100644",
-    `--- a/${path}`,
-    `+++ b/${path}`,
-    "@@ -1,3 +1,4 @@",
-    " const one = 1;",
-    "-const two = 2;",
-    "+const two = 3;",
-    "+const three = 4;",
-    " const end = true;",
-    "\\ No newline at end of file",
-    "",
-  ].join("\n");
-}
-
-function testTheme(): DiffStyleTheme {
-  return {
-    fg: (_color, text) => `[fg]${text}[/]`,
-    bg: (_color, text) => `[bg]${text}[/]`,
-  };
-}
-
-function makeComponent(
-  parsedFiles: ReviewFile[],
-  parsedLines: ReturnType<typeof parseReviewSnapshot>,
-  comments: ReviewComment[],
-  onDone: (value: unknown) => void,
-): DiffReviewerComponent {
-  const fakeTui = {
-    terminal: { columns: 100, rows: 20 },
-    requestRender() {},
-  };
-  const fakeTheme = {
-    fg: (_color: string, text: string) => text,
-    bg: (_color: string, text: string) => text,
-    bold: (text: string) => text,
-  };
-  return new DiffReviewerComponent(fakeTui as never, fakeTheme as never, {} as never, onDone, {
-    snapshot: { ...snapshot(), files: parsedFiles },
-    parsed: parsedLines,
-    width: 100,
-    height: 20,
-    comments,
-  });
-}
-
-function snapshot(patch = baseFilePatch()): ReviewSnapshot {
-  return {
-    repoRoot: "/repo",
-    baseRevision: "HEAD",
-    head: "abc123",
-    fingerprint: "abcdef1234567890",
-    files: [
-      {
-        id: "modified:src/example.ts:src/example.ts",
-        oldPath: "src/example.ts",
-        newPath: "src/example.ts",
-        displayPath: "src/example.ts",
-        status: "modified",
-        kind: "text",
-        reviewable: true,
-        patch,
-        hunks: [],
-      },
-    ],
-    skippedCount: 0,
-    truncated: false,
-  };
-}
-
-function parse(patch?: string) {
-  return parseReviewSnapshot(snapshot(patch));
-}
 
 test("parses hunk lines and old/new line numbers", () => {
   const parsed = parse();
@@ -137,11 +50,7 @@ test("captures staged, unstaged, and untracked changes together", async (t) => {
   await realGit.exec("git", ["init"], { cwd: directory });
   await writeFile(join(directory, "tracked.txt"), "one\n", "utf8");
   await realGit.exec("git", ["add", "tracked.txt"], { cwd: directory });
-  await realGit.exec(
-    "git",
-    ["-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "init"],
-    { cwd: directory },
-  );
+  await gitCommit(directory);
 
   await writeFile(join(directory, "tracked.txt"), "one\ntwo\n", "utf8");
   await writeFile(join(directory, "staged.txt"), "staged\n", "utf8");
@@ -212,11 +121,7 @@ test("captures renames and marks binary files non-reviewable", async (t) => {
   await writeFile(join(directory, "old name.txt"), "hello\n", "utf8");
   await writeFile(join(directory, "image.png"), Buffer.from([0, 1, 2, 3]));
   await realGit.exec("git", ["add", "."], { cwd: directory });
-  await realGit.exec(
-    "git",
-    ["-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "init"],
-    { cwd: directory },
-  );
+  await gitCommit(directory);
   await realGit.exec("git", ["mv", "old name.txt", "new name.txt"], { cwd: directory });
   await writeFile(join(directory, "image.png"), Buffer.from([0, 1, 2, 4]));
 
@@ -318,7 +223,6 @@ test("reviewer rejects empty :w and supports :w!", () => {
     {
       snapshot: { ...snapshot(), files: parsed.files },
       parsed,
-      width: 100,
       height: 20,
       comments,
     },
@@ -347,35 +251,10 @@ test("reviewer rejects empty :w and supports :w!", () => {
 test("reviewer supports visual selection and comment editing", () => {
   const parsed = parse();
   const comments: ReviewComment[] = [];
-  const rendered: string[][] = [];
   let result: unknown;
-  const editorText: string[] = [];
-  let currentText = "";
-
-  const fakeTui = {
-    terminal: { columns: 100, rows: 20 },
-    requestRender() {},
-  };
-  const fakeTheme = {
-    fg: (_color: string, text: string) => text,
-    bg: (_color: string, text: string) => text,
-    bold: (text: string) => text,
-  };
-  const component = new DiffReviewerComponent(
-    fakeTui as never,
-    fakeTheme as never,
-    {} as never,
-    (value) => {
-      result = value;
-    },
-    {
-      snapshot: { ...snapshot(), files: parsed.files },
-      parsed,
-      width: 100,
-      height: 20,
-      comments,
-    },
-  );
+  const component = makeComponent(parsed.files, parsed, comments, (value) => {
+    result = value;
+  });
 
   component.handleInput("j");
   component.handleInput("v");
@@ -392,28 +271,43 @@ test("reviewer supports visual selection and comment editing", () => {
     "diff stays visible while commenting",
   );
 
-  component.handleInput("e");
-  component.handleInput("x");
-  component.handleInput("p");
-  component.handleInput("l");
-  component.handleInput("a");
-  component.handleInput("i");
-  component.handleInput("n");
+  for (const char of "explain") component.handleInput(char);
   component.handleInput("\x1b");
 
+  const removal = parsed.lines.find((line) => line.kind === "removal")!;
+  const addition = parsed.lines.find((line) => line.kind === "addition")!;
   assert.equal(comments.length, 1);
   assert.equal(comments[0]?.body, "explain");
-  assert.equal(comments[0]?.target.type, "range");
+  assert.deepEqual(comments[0]?.target, {
+    type: "range",
+    fileIndex: 0,
+    startLineIndex: removal.id,
+    endLineIndex: addition.id,
+  });
+  assert.ok(
+    component.render(100).some((line) => line.includes("●")),
+    "commented lines are marked",
+  );
 
-  rendered.push(component.render(100));
-  assert.ok(rendered[0]!.some((line) => line.includes("●")));
+  // Enter on a commented line reopens that comment with its body loaded.
+  component.handleInput("k");
+  component.handleInput("\r");
+  assert.ok(
+    component
+      .render(100)
+      .map(stripTerminalSequences)
+      .some((line) => line.includes("explain")),
+    "existing body is loaded into the editor",
+  );
+  for (const char of " more") component.handleInput(char);
+  component.handleInput("\x1b");
+  assert.equal(comments.length, 1, "editing updates the comment in place");
+  assert.equal(comments[0]?.body, "explain more");
 
   component.handleInput(":");
   component.handleInput("w");
   component.handleInput("\r");
   assert.deepEqual(result, { action: "write", force: false });
-  assert.equal(editorText.length, 0);
-  assert.equal(currentText, "");
 });
 
 test("intra-line highlighting inverse-styles changed words in paired lines", () => {
@@ -899,11 +793,7 @@ test("modified files with non-ASCII paths receive their patches", async (t) => {
   await realGit.exec("git", ["init"], { cwd: directory });
   await writeFile(join(directory, "unicodé.txt"), "one\n", "utf8");
   await realGit.exec("git", ["add", "."], { cwd: directory });
-  await realGit.exec(
-    "git",
-    ["-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "init"],
-    { cwd: directory },
-  );
+  await gitCommit(directory);
   await writeFile(join(directory, "unicodé.txt"), "one\ntwo\n", "utf8");
 
   const captured = await captureReviewSnapshot(realGit, directory);
@@ -920,11 +810,7 @@ test("pure renames keep their metadata patch and stay listed", async (t) => {
   await realGit.exec("git", ["init"], { cwd: directory });
   await writeFile(join(directory, "old.txt"), "same\n", "utf8");
   await realGit.exec("git", ["add", "."], { cwd: directory });
-  await realGit.exec(
-    "git",
-    ["-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "init"],
-    { cwd: directory },
-  );
+  await gitCommit(directory);
   await realGit.exec("git", ["mv", "old.txt", "new.txt"], { cwd: directory });
 
   const captured = await captureReviewSnapshot(realGit, directory);
@@ -965,7 +851,7 @@ test("short terminals bound the comment dock and keep cursor, hint, and footer",
     } as never,
     {} as never,
     () => {},
-    { snapshot: { ...snapshot(), files: parsed.files }, parsed, width: 100, height: 9, comments },
+    { snapshot: { ...snapshot(), files: parsed.files }, parsed, height: 9, comments },
   );
 
   component.handleInput("C");
@@ -1040,11 +926,7 @@ test("modified tracked files with spaces in their names receive patches", async 
   await realGit.exec("git", ["init"], { cwd: directory });
   await writeFile(join(directory, "with space.txt"), "one\n", "utf8");
   await realGit.exec("git", ["add", "."], { cwd: directory });
-  await realGit.exec(
-    "git",
-    ["-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-m", "init"],
-    { cwd: directory },
-  );
+  await gitCommit(directory);
   await writeFile(join(directory, "with space.txt"), "one\ntwo\n", "utf8");
 
   const captured = await captureReviewSnapshot(realGit, directory);

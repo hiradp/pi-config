@@ -26,7 +26,6 @@ export type ReviewerDoneResult = { action: "write"; force: boolean } | { action:
 export interface ReviewerComponentOptions {
   snapshot: ReviewSnapshot;
   parsed: ParsedReview;
-  width: number;
   height: number;
   comments: ReviewComment[];
 }
@@ -54,22 +53,6 @@ interface CommentDraftState {
   original: string;
 }
 
-export interface ReviewerController {
-  getState(): {
-    mode: ReviewerMode;
-    cursor: number;
-    scroll: number;
-    horizontal: number;
-    command: string;
-    comments: ReviewComment[];
-    status: string;
-    helpScroll: number;
-  };
-  handleKey(data: string): void;
-  updateComments(): void;
-  beginComment(target: ReviewCommentTarget, existing?: ReviewComment): void;
-}
-
 const PENDING_TIMEOUT_MS = 1000;
 const HELP_LINES = [
   "Diff review keys",
@@ -93,7 +76,8 @@ const HELP_LINES = [
   "  C              comment whole file",
   "  o              edit overall review note",
   "  Enter          edit comment on current line",
-  "  dd             delete comment on current line",
+  "  dd             delete the line comment under the cursor",
+  "                 (C and o comments are removed by saving them empty)",
   "",
   "Commands",
   "  :w             write comments to the Pi editor",
@@ -111,7 +95,7 @@ const HELP_LINES = [
   "  Esc saves a non-empty comment",
   "  Ctrl-c cancels the current edit",
   "",
-  "Esc              close help or cancel",
+  "Esc / Ctrl-c     cancel pending keys or a selection, else quit like :q",
 ] as const;
 
 export function createCommentId(now = Date.now()): string {
@@ -197,6 +181,8 @@ export class DiffReviewerComponent implements Component, Focusable {
   private ordinals: Map<number, number> | null = null;
   private pending = "";
   private pendingAt = 0;
+  private pendingCount = 1;
+  private pendingHasCount = false;
   private status = "";
   private cachedWidth = -1;
   private cachedHeight = -1;
@@ -309,7 +295,9 @@ export class DiffReviewerComponent implements Component, Focusable {
     this.cursor = selectable[target]!;
   }
 
-  private moveAbsolute(count: number, target: number): void {
+  // Targets are buffer positions as shown in the footer; the cursor lands on
+  // the nearest selectable line.
+  private moveAbsolute(target: number): void {
     const selectable = this.selectableIndices();
     if (selectable.length === 0) return;
     const targetLine = clamp(target, 0, this.lines.length - 1);
@@ -319,7 +307,6 @@ export class DiffReviewerComponent implements Component, Focusable {
       selectable[0]!,
     );
     this.cursor = nearest;
-    void count;
   }
 
   private findMarker(kind: "hunk" | "file", direction: 1 | -1): number {
@@ -352,29 +339,32 @@ export class DiffReviewerComponent implements Component, Focusable {
     }
   }
 
+  private isChange(index: number): boolean {
+    const line = this.lines[index];
+    return line !== undefined && (line.kind === "addition" || line.kind === "removal");
+  }
+
+  // A changed block is a run of consecutive added and removed lines; hunk and
+  // file headers always separate runs.
+  private startsChangedBlock(index: number): boolean {
+    return this.isChange(index) && !this.isChange(index - 1);
+  }
+
   private moveToChange(direction: 1 | -1, count: number): void {
     for (let iteration = 0; iteration < count; iteration += 1) {
       let candidate = -1;
-
-      if (direction === 1) {
-        candidate = this.lines.findIndex(
-          (line, index) =>
-            index > this.cursor && (line.kind === "addition" || line.kind === "removal"),
-        );
-      } else {
-        for (let index = this.cursor - 1; index >= 0; index -= 1) {
-          const line = this.lines[index]!;
-          if (line.kind === "addition" || line.kind === "removal") {
-            candidate = index;
-            break;
-          }
+      for (
+        let index = this.cursor + direction;
+        index >= 0 && index < this.lines.length;
+        index += direction
+      ) {
+        if (this.startsChangedBlock(index)) {
+          candidate = index;
+          break;
         }
       }
-
       if (candidate < 0) break;
       this.cursor = candidate;
-      if (!lineIsSelectable(this.lines[this.cursor]))
-        this.moveToSelectable(this.cursor, direction, 1);
     }
   }
 
@@ -387,6 +377,15 @@ export class DiffReviewerComponent implements Component, Focusable {
   private clearPending(): void {
     this.pending = "";
     this.pendingAt = 0;
+    this.pendingCount = 1;
+    this.pendingHasCount = false;
+  }
+
+  private setPending(key: string, count: number, hasCount: boolean): void {
+    this.pending = key;
+    this.pendingAt = Date.now();
+    this.pendingCount = count;
+    this.pendingHasCount = hasCount;
   }
 
   private lineAtCursor(): ReviewLine | undefined {
@@ -506,9 +505,9 @@ export class DiffReviewerComponent implements Component, Focusable {
     this.refresh();
   }
 
-  private finishVisualComment(): void {
+  private finishVisualComment(): boolean {
     const line = this.lineAtCursor();
-    if (!line || !this.visual) return;
+    if (!line || !this.visual) return false;
     const anchorLine = this.lines[this.visual.anchor];
     if (
       !anchorLine ||
@@ -517,10 +516,11 @@ export class DiffReviewerComponent implements Component, Focusable {
     ) {
       this.status = "Selection must stay within one hunk";
       this.refresh();
-      return;
+      return false;
     }
     const target = targetForSelection(this.lines, this.visual.anchor, this.cursor);
     this.beginComment(target);
+    return true;
   }
 
   private fileAtCursor(): ReviewFile | undefined {
@@ -746,19 +746,24 @@ export class DiffReviewerComponent implements Component, Focusable {
     else if (matchesKey(data, Key.left)) data = "h";
     else if (matchesKey(data, Key.right)) data = "l";
 
-    if (matchesKey(data, Key.ctrl("c"))) {
-      this.done({ action: "cancel" });
-      return;
-    }
-
-    if (matchesKey(data, Key.escape)) {
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
       if (this.mode === "visual") {
         this.mode = "normal";
         this.visual = null;
         this.refresh();
         return;
       }
-      this.done({ action: "cancel" });
+      const hadPending = this.pending !== "" && Date.now() - this.pendingAt <= PENDING_TIMEOUT_MS;
+      const hadCount = this.countBuffer !== "";
+      this.clearPending();
+      this.countBuffer = "";
+      if (hadPending || hadCount) {
+        this.refresh();
+        return;
+      }
+      // Quitting goes through the same guard as :q so a stray Esc never drops
+      // comments; :q! remains the explicit discard.
+      this.executeCommand("q");
       return;
     }
 
@@ -790,19 +795,22 @@ export class DiffReviewerComponent implements Component, Focusable {
       return;
     }
 
-    if (data >= "1" && data <= "9") {
+    if ((data >= "1" && data <= "9") || (data === "0" && this.countBuffer !== "")) {
       this.countBuffer += data;
       this.refresh();
       return;
     }
 
-    const count = this.consumeCount();
+    const inputHasCount = this.countBuffer !== "";
+    const inputCount = this.consumeCount();
     const pendingKey =
       this.pending && Date.now() - this.pendingAt <= PENDING_TIMEOUT_MS ? this.pending : "";
+    const hasCount = pendingKey ? this.pendingHasCount : inputHasCount;
+    const count = pendingKey ? this.pendingCount : inputCount;
     this.clearPending();
 
     if (pendingKey === "g" && data === "g") {
-      this.moveAbsolute(count, 0);
+      this.moveAbsolute(hasCount ? count - 1 : 0);
       this.refresh();
       return;
     }
@@ -852,7 +860,7 @@ export class DiffReviewerComponent implements Component, Focusable {
         this.horizontal += 4 * count;
         break;
       case "G":
-        this.moveAbsolute(count, this.lines.length - 1);
+        this.moveAbsolute(hasCount ? count - 1 : this.lines.length - 1);
         break;
       case "r":
         this.relativeNumbers = !this.relativeNumbers;
@@ -878,29 +886,21 @@ export class DiffReviewerComponent implements Component, Focusable {
         break;
       case "c":
         if (this.mode === "visual") {
-          this.finishVisualComment();
-          this.visual = null;
+          // A refused selection stays active so it can be adjusted.
+          if (this.finishVisualComment()) this.visual = null;
         } else {
-          this.pending = "c";
-          this.pendingAt = Date.now();
+          this.setPending("c", count, hasCount);
         }
         break;
       case "C":
         this.openFileComment();
         break;
       case "d":
-        this.pending = "d";
-        this.pendingAt = Date.now();
-        break;
       case "g":
-        this.pending = "g";
-        this.pendingAt = Date.now();
-        break;
       case "[":
       case "]":
       case ",":
-        this.pending = data;
-        this.pendingAt = Date.now();
+        this.setPending(data, count, hasCount);
         break;
       case ":":
         this.enterCommand();
@@ -983,11 +983,15 @@ export class DiffReviewerComponent implements Component, Focusable {
       : "";
     const status = file ? file.status[0]!.toUpperCase() : "-";
     const path = file?.displayPath ?? "(no file)";
-    const title = ` ${this.theme.fg("accent", this.theme.bold(mode))}  ${this.theme.fg("text", truncateToWidth(path, Math.max(10, width - 34)))}`;
+    const skipped = this.options.snapshot.skippedCount;
+    const skippedText = skipped > 0 ? ` · ${skipped} skipped` : "";
     const right = this.theme.fg(
       "muted",
-      ` ${status} · ${reviewComments} comment${reviewComments === 1 ? "" : "s"}${fileComments ? ` · ${fileComments} here` : ""}${selectionText} `,
+      ` ${status} · ${reviewComments} comment${reviewComments === 1 ? "" : "s"}${fileComments ? ` · ${fileComments} here` : ""}${selectionText}${skippedText} `,
     );
+    const label = ` ${this.theme.fg("accent", this.theme.bold(mode))}  `;
+    const pathWidth = Math.max(10, width - visibleWidth(label) - visibleWidth(right));
+    const title = `${label}${this.theme.fg("text", truncateToWidth(path, pathWidth))}`;
     return truncateToWidth(title + right, width, "", true);
   }
 
@@ -1023,8 +1027,7 @@ export class DiffReviewerComponent implements Component, Focusable {
             : " ";
     const gutter = `${marker} ${numbers} ${prefix} `;
     const contentWidth = Math.max(1, width - visibleWidth(gutter));
-    const source = line.text.replaceAll("\t", "   ");
-    const styled = this.styler.styleText(line, source, { selected });
+    const styled = this.styler.styleText(line, line.text, { selected });
     const content = sliceByColumn(styled, this.horizontal, contentWidth, true);
 
     const gutterStyled = isCursor ? this.theme.fg("accent", gutter) : this.theme.fg("dim", gutter);
@@ -1139,12 +1142,8 @@ export class DiffReviewerComponent implements Component, Focusable {
     const pending =
       this.pending && Date.now() - this.pendingAt <= PENDING_TIMEOUT_MS ? this.pending : "";
     if (pending) {
-      return truncateToWidth(
-        this.theme.fg("muted", ` ${pending}${this.countBuffer}`),
-        width,
-        "",
-        true,
-      );
+      const count = this.pendingHasCount ? String(this.pendingCount) : "";
+      return truncateToWidth(this.theme.fg("muted", ` ${count}${pending}`), width, "", true);
     }
 
     if (this.mode === "command") {
@@ -1206,30 +1205,4 @@ export class DiffReviewerComponent implements Component, Focusable {
     this.cachedLines = rendered.slice(0, height);
     return this.cachedLines;
   }
-}
-
-export function createReviewerController(component: DiffReviewerComponent): ReviewerController {
-  return {
-    getState() {
-      return {
-        mode: component["mode"],
-        cursor: component["cursor"],
-        scroll: component["scroll"],
-        horizontal: component["horizontal"],
-        command: component["command"].input,
-        comments: component["comments"],
-        status: component["status"],
-        helpScroll: component["help"].scroll,
-      };
-    },
-    handleKey(data: string) {
-      component.handleInput(data);
-    },
-    updateComments() {
-      component["refresh"]();
-    },
-    beginComment(target: ReviewCommentTarget, existing?: ReviewComment) {
-      component["beginComment"](target, existing);
-    },
-  };
 }
