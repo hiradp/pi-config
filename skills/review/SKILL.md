@@ -22,7 +22,8 @@ Perform a findings-first technical review grounded in the repository and the exa
 - Never post a review, comment, approval, requested-changes verdict, label, edit, merge, close, reopen, or workflow rerun on GitHub.
 - Use only read-only GitHub operations such as PR metadata lookup, diff retrieval, checks inspection, and GET requests.
 - Do not use `gh pr checkout` or otherwise alter the current checkout for a PR review. Inspect the PR diff, immutable head/base SHAs, and relevant blobs through read-only local or GitHub access.
-- Run only non-destructive local checks that are appropriate for the repository and target. Honor stricter instructions such as "don't run anything" or "review only".
+- For a pull request or committed revision, rely on completed CI checks for the exact reviewed head instead of rerunning equivalent tests locally. Verify which checks ran, their results, and that they cover the reviewed revision; report missing, skipped, stale, or mismatched checks as limitations.
+- Run a local check only when CI does not cover the target (for example, an uncommitted working-tree change) or when a specific targeted check would provide evidence that CI does not. Do not duplicate CI merely as a routine review step. Any local check must be non-destructive and appropriate for the repository and target. Honor stricter instructions such as "don't run anything" or "review only".
 - Never run production commands, live-cluster operations, deployment tooling, migrations, destructive test harnesses, or scripts with unclear side effects merely to validate a review.
 - If the user later asks to fix findings, modify only the approved scope. Do not commit, push, or update the PR unless separately requested.
 
