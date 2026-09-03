@@ -50,6 +50,7 @@
 
 !/prompts/
 /prompts/*
+!/prompts/daily-review.md
 !/prompts/review-code.md
 !/prompts/review-plan.md
 !/prompts/review-pr.md
