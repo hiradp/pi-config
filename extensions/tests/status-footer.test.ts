@@ -51,7 +51,7 @@ test("remote status polling skips settled turns and uses explicit five-minute re
   let clearedIntervals = 0;
   let branch = "main";
   let notifyBranchChange: (() => void) | undefined;
-  let footer: { dispose(): void } | undefined;
+  let footer: { dispose(): void; render(width: number): string[] } | undefined;
 
   globalThis.fetch = (async () => {
     quotaRequests++;
@@ -102,6 +102,11 @@ test("remote status polling skips settled turns and uses explicit five-minute re
     mode: "tui",
     cwd: "/repo",
     model: { provider: "anthropic", id: "claude" },
+    sessionManager: {
+      getSessionName: () => "🔵 Explore session naming",
+      getEntries: () => [],
+    },
+    getContextUsage: () => undefined,
     modelRegistry: {
       async getProviderAuth() {
         return { auth: { apiKey: "oauth-token" }, source: "oauth" };
@@ -113,9 +118,16 @@ test("remote status polling skips settled turns and uses explicit five-minute re
           tui: { requestRender(): void },
           theme: object,
           data: typeof footerData,
-        ) => { dispose(): void },
+        ) => { dispose(): void; render(width: number): string[] },
       ) {
-        footer = factory({ requestRender() {} }, {}, footerData);
+        footer = factory(
+          { requestRender() {} },
+          {
+            fg: (_color: string, text: string) => text,
+            getThinkingBorderColor: () => (text: string) => text,
+          },
+          footerData,
+        );
       },
     },
   } as unknown as ExtensionContext;
@@ -138,6 +150,7 @@ test("remote status polling skips settled turns and uses explicit five-minute re
     await settleRemoteRefreshes();
     assert.equal(quotaRequests, 2);
     assert.equal(pullRequestRequests, 1);
+    assert.match(footer?.render(120).join("\n") ?? "", /🔵 Explore session naming/);
 
     branch = "feature";
     notifyBranchChange?.();

@@ -521,8 +521,10 @@ export function modelDisplayName(model: { id: string; name?: string } | undefine
 
 export default function (pi: ExtensionAPI) {
   let requestQuotaRefresh: (() => void) | undefined;
+  let requestFooterRender: (() => void) | undefined;
 
   pi.on("model_select", () => requestQuotaRefresh?.());
+  pi.on("session_info_changed", () => requestFooterRender?.());
 
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
@@ -598,6 +600,8 @@ export default function (pi: ExtensionAPI) {
         tui.requestRender();
       });
       requestQuotaRefresh = refreshQuota;
+      const renderFooter = () => tui.requestRender();
+      requestFooterRender = renderFooter;
       const quotaTimer = setInterval(refreshQuota, 5 * 60 * 1000);
       const pullRequestTimer = setInterval(refreshPullRequest, PR_REFRESH_INTERVAL_MS);
       refreshQuota();
@@ -613,6 +617,7 @@ export default function (pi: ExtensionAPI) {
           quotaAbort.abort();
           pullRequestAbort.abort();
           if (requestQuotaRefresh === refreshQuota) requestQuotaRefresh = undefined;
+          if (requestFooterRender === renderFooter) requestFooterRender = undefined;
         },
         invalidate() {},
         render(width: number): string[] {
@@ -660,6 +665,9 @@ export default function (pi: ExtensionAPI) {
           } else {
             parts.push(basename(ctx.cwd));
           }
+
+          const sessionName = ctx.sessionManager.getSessionName?.();
+          if (sessionName) parts.push(sessionName);
 
           let modelPart = modelDisplayName(ctx.model);
           if (ctx.model?.reasoning && ctx.thinkingLevel) {

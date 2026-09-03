@@ -36,6 +36,8 @@
 !/extensions/usage/**
 !/extensions/session-review/
 !/extensions/session-review/**
+!/extensions/session-naming/
+!/extensions/session-naming/**
 !/extensions/slack/
 !/extensions/slack/**
 !/extensions/guardrails/
