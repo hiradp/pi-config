@@ -14,6 +14,9 @@
 !/settings.json
 !/tsconfig.json
 
+!/docs/
+!/docs/**
+
 !/themes/
 !/themes/*.json
 
