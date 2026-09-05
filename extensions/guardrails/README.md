@@ -16,15 +16,25 @@ Deterministic blocks can never be overridden by confirmation or semantic review.
 
 Built-in policies:
 
-- **self-protection** — blocks changes to `~/.pi/agent/settings.json` and the guardrails extension source;
-- **system safety** — blocks security weakening, persistence, shell/SSH identity-file changes, dangerous system deletion, and system permission changes;
+- **self-protection** — blocks changes to `~/.pi/agent/settings.json` and the guardrails extension source, including deleting or moving any ancestor directory and git commands that rewrite the worktree holding them (`checkout`, `stash`, `reset --hard`, `pull`, `apply`, and similar);
+- **system safety** — blocks security weakening (`curl -sk` flag clusters, every git spelling of a false `sslVerify`), persistence (cron, launchd, systemd, fish configuration, launch agent plists), shell/SSH identity-file changes, recursive or `find -exec rm` deletion of root, home directories, and whole system trees such as `/usr`, `/etc`, `/opt`, and `/Library` (globs and `~user` included; temp trees such as `/tmp` and `$TMPDIR` protect only their root), and system permission changes; asks for confirmation when shell structure cannot be classified;
 - **blocked commands** — blocks configured executables, including package-runner invocations;
-- **default branch** — blocks commits and pushes involving a repository default branch;
+- **default branch** — blocks commits (including `merge`, `pull`, `cherry-pick`, `rebase`, and `revert`) and pushes involving a repository default branch, following `checkout`/`switch` earlier in the same command;
 - **kubectl** — allows only configured read-oriented Kubernetes commands;
 - **paths** — blocks or confirms writes matching configured path patterns;
 - **semantic review** — sends only configured agent actions through an independent classifier.
 
-Read-only tools remain available if the configuration cannot be loaded. Side-effecting tools fail closed until a valid configuration is available; a failed reload keeps the last known-good configuration.
+Read-only tools remain available if the configuration is missing or invalid. Side-effecting tools fail closed until a valid configuration is available: a missing settings file, a malformed value, or an unknown key anywhere under `guardrails` makes the configuration invalid, and the diagnostics are shown at session start. A failed reload keeps the last known-good configuration.
+
+## Shell parsing
+
+Shell commands go through a small structural parser, not a shell. Every command position is checked: after `;`, `&`, `&&`, `||`, `|`, newlines, parentheses, braces, `if`/`then`/`else`/`while`/`for`/`do`/`case` keywords, and inside function bodies.
+
+Benign wrappers are resolved transparently and the wrapped command is checked as if it ran directly: `builtin`, `caffeinate`, `chronic`, `command`, `doas`, `env`, `exec`, `ionice`, `nice`, `nohup`, `setsid`, `stdbuf`, `sudo`, `time`, `timeout`, `unbuffer`, and `xargs`.
+
+Literal nested command text is parsed recursively: `$(…)`, backticks, `<(…)`/`>(…)`, `eval`, `watch`, `env -S`, `sh`/`bash`/`zsh`/`dash`/`ksh`/`fish -c`, `find -exec`, and heredocs or here-strings fed to a shell or `eval`, directly or through `cat`/`tee` pipes. Heredocs fed to data-consuming commands such as `cat`, `tee`, `grep`, `sed`, `git`, and `jq` are treated as data.
+
+Anything else asks for confirmation rather than being allowed: a command name that depends on an expansion, `eval`/`-c` text containing expansions, a shell reading commands from a pipe, a heredoc fed to another interpreter or an unknown command, and unbalanced quotes or parentheses. Confirmation never overrides a deterministic block found elsewhere in the same command.
 
 ## Semantic review
 
@@ -32,7 +42,7 @@ Semantic review is disabled by default and only runs for configured command pref
 
 The classifier receives only:
 
-- a redacted action summary, never write/edit contents;
+- the whole redacted shell command (up to 32 KB; larger commands ask for confirmation instead) or a redacted action summary, never write/edit contents;
 - the requesting policy and reason;
 - the latest direct user instruction, not the full transcript;
 - the action source, tool name, and working directory.
@@ -71,7 +81,7 @@ Configuration lives under `guardrails` in `~/.pi/agent/settings.json`:
       "enabled": true,
       "mode": "shadow",
       "timeoutMs": 15000,
-      "commands": ["gh", "git push", "terraform"],
+      "commands": ["claude", "gh", "git push", "helm", "pi", "terraform"],
       "paths": [".github/workflows", ".github/workflows/**"]
     },
     "kubectl": {
@@ -86,9 +96,13 @@ Configuration lives under `guardrails` in `~/.pi/agent/settings.json`:
 }
 ```
 
-Relative path patterns apply only inside the current working tree. Absolute and `~`-prefixed patterns are supported. `*` matches within one path segment; `**` spans directories. Paths are resolved through symlinks where possible.
+Relative path patterns apply only inside the current working tree. Absolute and `~`-prefixed patterns are supported. `*` matches within one path segment; `**` spans directories. Paths are resolved through symlinks and on-disk casing where possible, and matching folds case on macOS and Windows.
 
-Semantic command entries are executable/argument prefixes. For example, `git push` reviews `git push origin main` but not `git status`; a bare `gh` reviews every `gh` invocation. Common wrappers such as `env`, `sudo`, and `command` are resolved.
+Write targets come from shell redirects, common mutating commands (`rm`, `mv`, `cp`, `dd`, `tee`, `sed -i`, and similar), inline interpreter code (`node -e`, `python -c`, `sh -c`), `patch`, `tar` extraction, `rsync`, and worktree-rewriting git commands. A literal `cd` or `pushd` earlier in a command moves later relative paths. A `cd` inside a subshell, substitution, pipeline, background job, or nested shell text stays in that scope, while brace groups and `if`/`while` bodies carry it forward as a shell would. After a non-literal `cd` (variables, substitutions, `cd -`), later relative writes ask for confirmation.
+
+`defaultBranch.allowed` entries are `owner/repo`, `owner/*`, or absolute worktree paths. Owner and repository entries match github.com remotes only. A push is checked against the remote it actually targets (an explicit remote name or URL, else the branch's push remote); a commit is checked against the branch's upstream remote, else `origin`. Git invocations that cannot be classified ask for confirmation: a `--git-dir`, `--work-tree`, `GIT_DIR`, or `GIT_WORK_TREE` redirect, an earlier switch to a non-literal branch, a non-literal push remote, or a git process that hits the timeout.
+
+Semantic command entries are executable/argument prefixes. For example, `git push` reviews `git push origin main` but not `git status`; a bare `gh` reviews every `gh` invocation. Wrappers and nested command text are resolved as described in Shell parsing.
 
 Project-owned configuration is intentionally not loaded, so a checked-in repository cannot weaken personal guardrails.
 

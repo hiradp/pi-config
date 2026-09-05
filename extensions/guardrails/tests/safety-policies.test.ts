@@ -137,9 +137,9 @@ describe("guardrails configuration", () => {
     assert.equal(invalid.diagnostics.length, 3);
   });
 
-  test("reports unknown keys without disabling valid policies", () => {
+  test("marks unknown keys invalid so a misspelled rule cannot silently disable itself", () => {
     const result = parseGuardrailsSettings({ guardrails: { futurePolicy: true } });
-    assert.equal(result.valid, true);
+    assert.equal(result.valid, false);
     assert.match(result.diagnostics[0] ?? "", /Unknown guardrails\.futurePolicy/);
   });
 });
@@ -403,7 +403,7 @@ describe("system safety", () => {
     }
   });
 
-  test("ignores unsafe command text in heredoc bodies", async () => {
+  test("applies safety rules to heredoc bodies only when a shell runs them", async () => {
     assert.equal(
       await check(
         systemSafetyPolicy,
@@ -413,6 +413,19 @@ describe("system safety", () => {
     );
     assert.equal(
       (await check(systemSafetyPolicy, bash("cat <<'EOF'\nrm -rf /\nEOF\nrm -rf /")))?.outcome,
+      "block",
+    );
+    assert.equal(
+      (await check(systemSafetyPolicy, bash("bash <<'EOF'\nrm -rf /\nEOF")))?.outcome,
+      "block",
+    );
+    assert.equal(
+      (
+        await check(
+          systemSafetyPolicy,
+          bash("cat <<'EOF' | sh\necho key >> ~/.ssh/authorized_keys\nEOF"),
+        )
+      )?.outcome,
       "block",
     );
   });

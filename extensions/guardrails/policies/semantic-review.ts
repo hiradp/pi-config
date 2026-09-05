@@ -58,7 +58,7 @@ function standaloneLiteralGhInvocation(
   if (
     segment.redirectTargets.length > 0 ||
     basename(segment.words[0] ?? "") !== "gh" ||
-    /&/.test(segment.text) ||
+    /&/.test(command) ||
     hasDynamicShellSyntax(segment.text)
   ) {
     return;

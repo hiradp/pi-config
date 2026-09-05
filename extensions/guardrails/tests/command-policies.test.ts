@@ -110,11 +110,13 @@ describe("blocked command guard", () => {
     );
   });
 
-  test("ignores blocked command names in heredoc bodies", async () => {
+  test("ignores heredoc bodies fed to commands that treat input as data", async () => {
     for (const command of [
       "cat <<'EOF'\nwrangler deploy\nEOF",
       "cat <<-EOF\n\twrangler deploy\n\tEOF",
       "cat <<ONE <<'TWO'\nwrangler deploy\nONE\nwrangler deploy\nTWO",
+      "tee deploy.sh <<'EOF'\nwrangler deploy\nEOF",
+      "cat <<'EOF' | grep deploy\nwrangler deploy\nEOF",
       String.raw`cat <<"E\OF"
 wrangler deploy
 E\OF`,
@@ -124,6 +126,17 @@ wrangler deploy
 EOF`,
     ]) {
       assert.equal(await check(blockedCommandsPolicy, command), undefined);
+    }
+  });
+
+  test("blocks commands in heredoc bodies fed to a shell", async () => {
+    for (const command of [
+      "bash <<'EOF'\nwrangler deploy\nEOF",
+      "sh <<EOF\necho preparing\nwrangler deploy\nEOF",
+      "cat <<'EOF' | bash\nwrangler deploy\nEOF",
+      "cat <<'EOF' | sudo sh\nnpx wrangler deploy\nEOF",
+    ]) {
+      assert.match((await check(blockedCommandsPolicy, command)) ?? "", /Blocked command/);
     }
   });
 

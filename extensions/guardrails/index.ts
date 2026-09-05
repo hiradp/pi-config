@@ -41,6 +41,7 @@ import {
 import {
   classifySemanticAction,
   latestDirectUserInstruction,
+  semanticActionEvidence,
   type SemanticClassifier,
 } from "./semantic-review.ts";
 
@@ -179,6 +180,20 @@ export function registerGuardrails(
     if (
       result.decision.outcome === "review" &&
       result.policy === semanticReviewPolicy.name &&
+      config.semanticReview.enabled &&
+      semanticActionEvidence(action) === undefined
+    ) {
+      // The classifier would only see part of the command, so it cannot vouch for all of it.
+      result = {
+        policy: semanticReviewPolicy.name,
+        decision: {
+          outcome: "confirm",
+          reason: `${result.decision.reason}\nThe command is too large for semantic review; confirm it manually.`,
+        },
+      };
+    } else if (
+      result.decision.outcome === "review" &&
+      result.policy === semanticReviewPolicy.name &&
       config.semanticReview.enabled
     ) {
       try {
@@ -297,6 +312,12 @@ export function registerGuardrails(
   pi.on("session_start", async (_event, ctx) => {
     await reloadConfig();
     state = restoreState(ctx);
+    if (configDiagnostics.length > 0 && ctx.hasUI) {
+      ctx.ui.notify(
+        `Guardrails configuration diagnostics:\n${configDiagnostics.join("\n")}`,
+        hasValidConfig ? "warning" : "error",
+      );
+    }
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
