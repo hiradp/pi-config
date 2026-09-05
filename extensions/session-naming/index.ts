@@ -22,7 +22,7 @@ const AUTO_NAME_ENTRY = "session-naming:auto";
 const CATEGORY_ENTRY = "session-naming:category";
 const CLASSIFIER_PROVIDER = "openai-codex";
 const CLASSIFIER_MODEL = "gpt-5.6-luna";
-const AUTO_NAME_AFTER_USER_MESSAGES = 2;
+const AUTO_NAME_AFTER_USER_MESSAGES = 5;
 const CLASSIFIER_TIMEOUT_MS = 10_000;
 
 interface GeneratedClassification {

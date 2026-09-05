@@ -173,15 +173,17 @@ test("falls back to a bounded project title", () => {
   );
 });
 
-test("automatically names a persisted TUI session after two user requests", async () => {
+test("automatically names a persisted TUI session after five user requests", async () => {
   const runtime = fakeRuntime();
   runtime.handlers.get("session_start")?.({}, runtime.ctx);
 
-  runtime.entries.push(userEntry("one", "Let's discuss session names"));
-  await runtime.handlers.get("agent_settled")?.({}, runtime.ctx);
-  assert.equal(runtime.completions, 0);
+  for (let index = 1; index < 5; index++) {
+    runtime.entries.push(userEntry(String(index), `Session naming request ${index}`));
+    await runtime.handlers.get("agent_settled")?.({}, runtime.ctx);
+    assert.equal(runtime.completions, 0);
+  }
 
-  runtime.entries.push(userEntry("two", "Use category colors"));
+  runtime.entries.push(userEntry("five", "Use category colors"));
   await runtime.handlers.get("agent_settled")?.({}, runtime.ctx);
   assert.equal(runtime.completions, 1);
   assert.deepEqual(runtime.names, ["🔵 Compare session naming approaches"]);
@@ -197,6 +199,9 @@ test("does not overwrite a manually named session", async () => {
   runtime.entries.push(
     userEntry("one", "Investigate latency"),
     userEntry("two", "Check production"),
+    userEntry("three", "Read recent logs"),
+    userEntry("four", "Inspect the deployment"),
+    userEntry("five", "Summarize the incident"),
   );
   runtime.handlers.get("session_start")?.({}, runtime.ctx);
 
@@ -210,6 +215,9 @@ test("uses a deterministic project fallback when the classifier is unavailable",
   runtime.entries.push(
     userEntry("one", "Refactor authentication middleware"),
     userEntry("two", "Add regression tests"),
+    userEntry("three", "Check the current handlers"),
+    userEntry("four", "Update the implementation"),
+    userEntry("five", "Run the test suite"),
   );
   runtime.handlers.get("session_start")?.({}, runtime.ctx);
 
