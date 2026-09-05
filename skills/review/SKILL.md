@@ -71,12 +71,13 @@ Evaluate:
 ### Tests
 
 - Do tests exercise the behavior rather than merely mirror the implementation?
+- Does each added test protect an application-owned contract or concrete regression, rather than stable framework/library behavior or a shared helper already covered elsewhere?
 - Are important negative, boundary, concurrency, retry, timeout, and recovery cases covered?
 - Would the tests fail for the defect they claim to prevent?
 - Are fixtures and mocks faithful to production contracts?
 - Are important integration boundaries left unverified?
 
-A missing test is a confirmed finding only when tied to a concrete regression risk. Otherwise list it as a testing gap or follow-up.
+A missing test is a confirmed finding only when tied to a concrete regression risk. Otherwise list it as a testing gap or follow-up. A newly added test that can be deleted without reducing application behavior or regression coverage is normally not a defect; report it separately as a redundant test with an exact location and deletion rationale.
 
 ### Compatibility
 
@@ -161,6 +162,10 @@ After confirmed findings, use separate sections as applicable:
 ## Testing gaps
 
 - Useful additional validation not tied to a confirmed defect.
+
+## Redundant tests
+
+- Newly added tests that can be removed without reducing coverage of application-owned behavior or a concrete regression. Include an exact path and line, what implementation/framework behavior the test merely repeats, and why deletion is safe.
 
 ## Review coverage
 

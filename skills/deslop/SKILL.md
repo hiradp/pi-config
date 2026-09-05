@@ -1,11 +1,11 @@
 ---
 name: deslop
-description: Remove AI-generated slop from code changes. Use when the user says "deslop", "remove slop", "clean up AI comments", or wants to strip unnecessary AI-added comments from a branch's diff. Works with any language, optimized for Go and Zig codebases.
+description: Remove AI-generated slop from code changes, including unnecessary comments and low-value tests. Use when the user says "deslop", "remove slop", "clean up AI comments", or asks to remove redundant tests that mirror implementation or framework behavior.
 ---
 
 # Deslop
 
-Select the task's comparison target deliberately, then remove AI-generated comment slop only from the verified task scope.
+Select the task's comparison target deliberately, then remove AI-generated comment and test slop only from the verified task scope. When tests are in scope, load and follow the `test-quality` skill.
 
 ## What to remove
 
@@ -31,6 +31,18 @@ If the *pre-existing* code already uses section headers in this style, leave the
 - Doc comments on unexported or obvious functions that don't need them
 - Any comment style inconsistent with the rest of the file
 
+## Low-value test slop
+
+Remove task-added tests when they only:
+
+- enumerate conventional associations, accessors, delegations, or other declarative wiring;
+- reverify stable framework or library behavior;
+- repeat a shared concern or helper's behavior for an includer that does not customize it;
+- assert generic IDs, timestamps, factory validity, or other defaults without an application-owned contract; or
+- mirror implementation branches without naming a credible regression.
+
+Keep tests for business invariants, negative and boundary cases, non-default lifecycle behavior, custom integration semantics, and concrete regressions. Do not remove a test solely because it is simple; apply the `test-quality` value gate and verify existing coverage first.
+
 ## What to keep
 
 - Comments explaining *why*, not *what*
@@ -45,5 +57,5 @@ If the *pre-existing* code already uses section headers in this style, leave the
 2. Inspect the committed task diff. Use the explicit range as given, or `git diff <target>...HEAD` for a branch target so the comparison starts at the merge base.
 3. Run `git status --short`, inspect relevant staged and unstaged diffs with `git diff --cached` and `git diff`, and inspect relevant untracked files. Distinguish task changes from unrelated or user-authored local work.
 4. For each task-scoped changed file, read the full file to understand its existing comment style and density.
-5. Remove slop comments only from verified task changes. Do not alter pre-existing comments, unrelated hunks, or local work whose ownership is uncertain.
+5. Remove slop comments and clearly redundant tests only from verified task changes. Do not alter pre-existing content, unrelated hunks, or local work whose ownership is uncertain.
 6. Report a 1-3 sentence summary of what was changed.

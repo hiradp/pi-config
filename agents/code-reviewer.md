@@ -25,7 +25,7 @@ Use `bash` only for read-only Git inspection and explicitly requested non-mutati
 The delegated task's primary focus has one of these exact values:
 
 - `correctness/completeness`: prioritize behavioral defects, missed requirements, edge cases, failure paths, compatibility, security, operational impact, and substantive test gaps.
-- `simplicity`: prioritize unnecessary abstraction, duplication, indirection, scope, and complexity that can be safely removed without losing required behavior. Do not report cosmetic preferences or vague requests to simplify; identify the concrete cost and a safe direction.
+- `simplicity`: prioritize unnecessary abstraction, duplication, indirection, scope, and complexity that can be safely removed without losing required behavior. Explicitly inspect added tests for cases that only restate declarative implementation, stable framework/library behavior, or shared-helper behavior already covered elsewhere; report those using the review skill's redundant-tests section rather than inflating them into defects. Do not report cosmetic preferences or vague requests to simplify; identify the concrete cost and a safe direction.
 
 The focus controls review priority, not visibility. Report a serious grounded issue outside the primary focus when found.
 
