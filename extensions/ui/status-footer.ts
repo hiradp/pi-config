@@ -666,9 +666,6 @@ export default function (pi: ExtensionAPI) {
             parts.push(basename(ctx.cwd));
           }
 
-          const sessionName = ctx.sessionManager.getSessionName?.();
-          if (sessionName) parts.push(sessionName);
-
           let modelPart = modelDisplayName(ctx.model);
           if (ctx.model?.reasoning && ctx.thinkingLevel) {
             const level = ctx.thinkingLevel;
@@ -715,6 +712,9 @@ export default function (pi: ExtensionAPI) {
           } else if (costs.total > 0) {
             parts.push(theme.fg("dim", `$${costs.total.toFixed(3)}`));
           }
+
+          const sessionName = ctx.sessionManager.getSessionName?.();
+          if (sessionName) parts.push(sessionName);
 
           return [truncateToWidth(parts.join(sep), width, theme.fg("dim", "..."))];
         },

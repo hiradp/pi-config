@@ -150,7 +150,10 @@ test("remote status polling skips settled turns and uses explicit five-minute re
     await settleRemoteRefreshes();
     assert.equal(quotaRequests, 2);
     assert.equal(pullRequestRequests, 1);
-    assert.match(footer?.render(120).join("\n") ?? "", /🔵 Explore session naming/);
+    const narrowFooter = footer?.render(40).join("\n") ?? "";
+    assert.match(narrowFooter, /claude/);
+    assert.doesNotMatch(narrowFooter, /Explore session naming/);
+    assert.match(footer?.render(120).join("\n") ?? "", /Explore session naming/);
 
     branch = "feature";
     notifyBranchChange?.();
