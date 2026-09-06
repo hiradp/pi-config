@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.84.4",
+  "lastChangelogVersion": "0.85.1",
   "theme": "rustic-light/dark",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-6-astra",
@@ -102,6 +102,7 @@
       ]
     }
   },
+  "tuiMode": "fullscreen",
   "treeFilterMode": "default",
   "transport": "auto",
   "steeringMode": "one-at-a-time",
