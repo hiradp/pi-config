@@ -1,6 +1,6 @@
 # UI
 
-The RADBOT header centers a slime-green stencil logo above a compact loadout summary. `/loadout` opens the full resource names in a scrollable overlay; Escape closes it. Loading errors and conflicts remain in the startup transcript.
+The Pi header centers a slime-green stencil logo above a compact loadout summary. `/loadout` opens the full resource names in a scrollable overlay; Escape closes it. Loading errors and conflicts remain in the startup transcript.
 
 The prompt uses a thin purple frame, a slime-green `›`, and readable text. Bash input changes the marker to amber; thinking level is shown in the footer rather than coloring the whole frame. Pi still handles editing, autocomplete, paste, and app shortcuts.
 

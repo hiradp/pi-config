@@ -14,7 +14,7 @@ const theme = {
 function startup() {
   initTheme("dark", false);
   const resources = new Container();
-  const header = new Text("RADBOT", 0, 0);
+  const header = new Text("Pi", 0, 0);
   const headerContainer = new Container();
   headerContainer.addChild(header);
   const chat = new Text("[Skills]\nThis is a message, not an inventory.", 0, 0);

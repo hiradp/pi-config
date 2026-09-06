@@ -22,19 +22,11 @@ test("metal header stays within the terminal width", () => {
 
 test("metal header adapts its identity to available space", () => {
   assert.match(metalHeaderLines(theme, 80, "test").join("\n"), /pi vtest/);
-  assert.deepEqual(metalHeaderLines(theme, 40, "test").map(stripVTControlCharacters), [
-    "",
-    "              R A D B O T",
-    "                pi vtest",
-    "",
-  ]);
-  assert.deepEqual(metalHeaderLines(theme, 12, "test").map(stripVTControlCharacters), [
-    "   RADBOT",
-  ]);
+  assert.deepEqual(metalHeaderLines(theme, 12, "test").map(stripVTControlCharacters), ["     Pi"]);
 });
 
 test("full metal header centers the unboxed artwork without straightening its slant", () => {
-  for (const width of [41, 42, 80, 81, 120]) {
+  for (const width of [14, 15, 40, 80, 81, 120]) {
     const lines = metalHeaderLines(theme, width, "test").map(stripVTControlCharacters);
     const logo = lines.slice(1, 6);
     const left = Math.min(...logo.map((line) => line.search(/\S/u)));

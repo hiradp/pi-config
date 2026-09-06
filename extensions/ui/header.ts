@@ -9,11 +9,11 @@ const RESET_FG = "\x1b[39m";
 const cut = (text: string) => `${PURPLE}${text}${SLIME}`;
 
 const LOGO = [
-  "    ____  ___    ____  ____  ____  ______",
-  String.raw`   / ${cut("_")}  \/   |  / __ \/ __ )/ ${cut("_")}  \/_  __/`,
-  String.raw`  / /_/ / /| | / / / / __ // / / / / /`,
-  String.raw` / _, _/ ___ |/ /_/ / /${cut("_")}  / /_/ / / /`,
-  String.raw`/_/ |_/_/  |_/_____/_____/\____/ /_/`,
+  "    ____  ____",
+  String.raw`   / ${cut("_")}  \/  _/`,
+  String.raw`  / /_/ // /`,
+  String.raw` / ____// /`,
+  String.raw`/_/   /_${cut("_")}_/`,
 ] as const;
 const LOGO_WIDTH = Math.max(...LOGO.map((line) => visibleWidth(line)));
 
@@ -30,14 +30,11 @@ function lettering(theme: Theme, text: string): string {
 export function metalHeaderLines(theme: Theme, width: number, version = VERSION): string[] {
   const availableWidth = Math.max(0, Math.floor(width));
   if (availableWidth === 0) return [];
-  if (availableWidth < 26) {
-    return [center(lettering(theme, "RADBOT"), availableWidth)];
+  if (availableWidth < LOGO_WIDTH) {
+    return [center(lettering(theme, "Pi"), availableWidth)];
   }
 
   const subtitle = center(theme.fg("dim", `pi v${version}`), availableWidth);
-  if (availableWidth < LOGO_WIDTH) {
-    return ["", center(lettering(theme, "R A D B O T"), availableWidth), subtitle, ""];
-  }
 
   // Center the artwork as one block, preserving the stencil's slant.
   const left = " ".repeat(Math.floor((availableWidth - LOGO_WIDTH) / 2));
