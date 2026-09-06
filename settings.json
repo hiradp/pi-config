@@ -9,11 +9,8 @@
     "openai-codex/gpt-5.6-terra",
     "openai-codex/gpt-5.6-luna",
     "openai-codex/gpt-6-astra",
-    "anthropic/claude-fable-5",
-    "anthropic/claude-opus-5",
-    "anthropic/claude-sonnet-5",
     "fireworks/accounts/fireworks/models/kimi-k3",
-    "fireworks/accounts/fireworks/models/glm-5p2"
+    "fireworks/accounts/fireworks/models/glm-5p3"
   ],
   "quietStartup": false,
   "editorPaddingX": 1,
@@ -105,7 +102,6 @@
       ]
     }
   },
-  "tuiMode": "fullscreen",
   "treeFilterMode": "default",
   "transport": "auto",
   "steeringMode": "one-at-a-time",
