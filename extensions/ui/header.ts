@@ -1,96 +1,107 @@
-import {
-  VERSION,
-  type ExtensionAPI,
-  type Theme,
-  type ThemeColor,
-} from "@earendil-works/pi-coding-agent";
+import { VERSION, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { StartupLoadout } from "./loadout-resources.ts";
+import { loadoutLines, LoadoutView } from "./loadout.ts";
+
+const SLIME = "\x1b[38;2;182;255;0m";
+const PURPLE = "\x1b[38;2;148;56;201m";
+const RESET_FG = "\x1b[39m";
+const cut = (text: string) => `${PURPLE}${text}${SLIME}`;
 
 const LOGO = [
-  "██████╗  █████╗ ██████╗ ██████╗  ██████╗ ████████╗",
-  "██╔══██╗██╔══██╗██╔══██╗██╔══██╗██╔═══██╗╚══██╔══╝",
-  "██████╔╝███████║██║  ██║██████╔╝██║   ██║   ██║",
-  "██╔══██╗██╔══██║██║  ██║██╔══██╗██║   ██║   ██║",
-  "██║  ██║██║  ██║██████╔╝██████╔╝╚██████╔╝   ██║",
-  "╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚═════╝  ╚═════╝    ╚═╝",
+  "    ____  ___    ____  ____  ____  ______",
+  String.raw`   / ${cut("_")}  \/   |  / __ \/ __ )/ ${cut("_")}  \/_  __/`,
+  String.raw`  / /_/ / /| | / / / / __ // / / / / /`,
+  String.raw` / _, _/ ___ |/ /_/ / /${cut("_")}  / /_/ / / /`,
+  String.raw`/_/ |_/_/  |_/_____/_____/\____/ /_/`,
 ] as const;
-
-const LOGO_COLORS: ThemeColor[] = ["dim", "muted", "text", "accent", "muted", "dim"];
 const LOGO_WIDTH = Math.max(...LOGO.map((line) => visibleWidth(line)));
-const FULL_CONTENT_WIDTH = 58;
-const FULL_FRAME_WIDTH = FULL_CONTENT_WIDTH + 4;
 
 function center(text: string, width: number): string {
-  const padding = Math.max(0, width - visibleWidth(text));
-  const left = Math.floor(padding / 2);
-  return `${" ".repeat(left)}${text}${" ".repeat(padding - left)}`;
+  const fitted = truncateToWidth(text, width, "");
+  const left = Math.floor((width - visibleWidth(fitted)) / 2);
+  return `${" ".repeat(left)}${fitted}`;
 }
 
-function fit(lines: string[], width: number): string[] {
-  return lines.map((line) => truncateToWidth(line, width, ""));
-}
-
-function fullHeader(theme: Theme, width: number, version: string): string[] {
-  const edge = (text: string) => theme.fg("dim", text);
-  const frame = (body: string) => `${edge("║")} ${body} ${edge("║")}`;
-  const lines = [edge(`╓${"─".repeat(FULL_CONTENT_WIDTH + 2)}╖`)];
-
-  for (const [index, logoLine] of LOGO.entries()) {
-    const color = LOGO_COLORS[index] ?? "text";
-    const normalizedLine = `${logoLine}${" ".repeat(LOGO_WIDTH - visibleWidth(logoLine))}`;
-    const body = center(normalizedLine, FULL_CONTENT_WIDTH);
-    lines.push(frame(theme.fg(color, index === 3 ? theme.bold(body) : body)));
-  }
-
-  lines.push(edge(`╟${"─".repeat(FULL_CONTENT_WIDTH + 2)}╢`));
-  lines.push(frame(theme.fg("muted", center(`PI v${version}`, FULL_CONTENT_WIDTH))));
-  lines.push(edge(`╙${"─".repeat(FULL_CONTENT_WIDTH + 2)}╜`));
-
-  return ["", ...fit(lines, width), ""];
-}
-
-function compactHeader(theme: Theme, width: number, version: string): string[] {
-  const frameWidth = Math.min(44, width);
-  const contentWidth = frameWidth - 4;
-  const edge = (text: string) => theme.fg("dim", text);
-  const row = (text: string, color: ThemeColor, bold = false) => {
-    const body = center(text, contentWidth);
-    const styled = theme.fg(color, bold ? theme.bold(body) : body);
-    return `${edge("║")} ${styled} ${edge("║")}`;
-  };
-  const lines = [
-    edge(`╓${"─".repeat(contentWidth + 2)}╖`),
-    row("◆ R A D B O T ◆", "accent", true),
-    edge(`╟${"─".repeat(contentWidth + 2)}╢`),
-    row(`PI v${version}`, "muted"),
-    edge(`╙${"─".repeat(contentWidth + 2)}╜`),
-  ];
-  return ["", ...fit(lines, width), ""];
+function lettering(theme: Theme, text: string): string {
+  return theme.bold(`${SLIME}${text}${RESET_FG}`);
 }
 
 export function metalHeaderLines(theme: Theme, width: number, version = VERSION): string[] {
   const availableWidth = Math.max(0, Math.floor(width));
   if (availableWidth === 0) return [];
   if (availableWidth < 26) {
-    return [
-      truncateToWidth(
-        theme.fg("accent", theme.bold(`RADBOT // PI v${version}`)),
-        availableWidth,
-        "",
-      ),
-    ];
+    return [center(lettering(theme, "RADBOT"), availableWidth)];
   }
-  if (availableWidth < FULL_FRAME_WIDTH) return compactHeader(theme, availableWidth, version);
-  return fullHeader(theme, availableWidth, version);
+
+  const subtitle = center(theme.fg("dim", `pi v${version}`), availableWidth);
+  if (availableWidth < LOGO_WIDTH) {
+    return ["", center(lettering(theme, "R A D B O T"), availableWidth), subtitle, ""];
+  }
+
+  // Center the artwork as one block, preserving the stencil's slant.
+  const left = " ".repeat(Math.floor((availableWidth - LOGO_WIDTH) / 2));
+  return ["", ...LOGO.map((line) => `${left}${lettering(theme, line)}`), "", subtitle, ""];
 }
 
 export default function (pi: ExtensionAPI) {
+  let currentLoadout: StartupLoadout | undefined;
+
+  pi.registerCommand("loadout", {
+    description: "Show loaded context, skills, prompts, extensions, and themes",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") return;
+      const sections = currentLoadout?.capture() ?? [];
+      if (sections.length === 0) {
+        ctx.ui.notify(
+          "No startup inventory available. Keep quietStartup disabled to populate /loadout.",
+          "info",
+        );
+        return;
+      }
+      await ctx.ui.custom<void>(
+        (tui, theme, _keys, done) => {
+          const view = new LoadoutView(
+            sections,
+            theme,
+            () => Math.max(3, Math.floor(tui.terminal.rows * 0.8)),
+            () => done(),
+          );
+          return {
+            render: (width) => view.render(width),
+            invalidate: () => view.invalidate(),
+            handleInput: (data) => {
+              view.handleInput(data);
+              tui.requestRender();
+            },
+          };
+        },
+        { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%" } },
+      );
+    },
+  });
+
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
 
-    ctx.ui.setHeader((_tui, theme) => ({
-      render: (width) => metalHeaderLines(theme, width),
-      invalidate() {},
-    }));
+    ctx.ui.setHeader((tui, theme) => {
+      let currentTheme = theme;
+      const header = {
+        render: (width: number) => [
+          ...metalHeaderLines(currentTheme, width),
+          ...loadoutLines(currentTheme, width, loadout.capture()),
+        ],
+        invalidate() {
+          currentTheme = ctx.ui.theme;
+        },
+        dispose() {
+          loadout.dispose();
+          if (currentLoadout === loadout) currentLoadout = undefined;
+        },
+      };
+      const loadout = new StartupLoadout(tui, header);
+      currentLoadout = loadout;
+      return header;
+    });
   });
 }

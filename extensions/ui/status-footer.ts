@@ -1,18 +1,20 @@
 /**
  * Status Footer - a pi port of the Claude statusline (lib/claude/statusline.sh).
  *
- * Layout: project[⎇workspace][/subdir]@branch (#pr) ↑a ↓b (+x -y ?z) | model · thinking | [bar] pct% / size | quotas | $cost
+ * Layout: directory @ branch +added -deleted #pr ↑ahead ↓behind       model · thinking
+ *         context pct% / window                                    quotas · $cost
+ * Normal widths use two inset rows; narrow widths compact optional details, then wrap groups.
  *
  * - folder/branch, ahead/behind, tracked diffstats, and untracked file count come from git,
  *   polled every GIT_REFRESH_INTERVAL_MS off the render path with reads that never overlap;
  *   branch changes refresh immediately, and untracked counting stops at UNTRACKED_LIMIT ("?10000+")
  * - the current branch's pull request number and status come from `gh pr view`;
- *   red means failed CI/changes requested, yellow means pending CI/review activity,
- *   green means ready to merge, accent means merged, and dim means another state
+ *   red means failed CI/changes requested, amber means pending CI/review activity,
+ *   green means ready to merge, lavender means merged, and muted means another state
  *   (failed or unauthenticated lookups are silently omitted and misses are cached)
  * - worktrees and nested `.workspaces` directories display compactly as "project⎇workspace";
  *   other deep paths omit intermediate directories
- * - the context bar mirrors the statusline: 80% real -> 100% displayed, 10 cells
+ * - context percentage retains the statusline scaling: 80% real -> 100% displayed
  * - session cost is summed from assistant message usage (same as the default footer)
  * - subscription quota chips are fetched for Anthropic and OpenAI Codex OAuth;
  *   providers without a supported usage API (including Cursor) are omitted
@@ -23,7 +25,8 @@
 import { execFile, spawn } from "node:child_process";
 import { basename, dirname, relative, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { uiPalette, type UiPalette } from "./palette.ts";
 
 const GIT_REFRESH_INTERVAL_MS = 2000;
 const GIT_TIMEOUT_MS = 3000;
@@ -519,6 +522,133 @@ export function modelDisplayName(model: { id: string; name?: string } | undefine
   return model?.id.split("/").at(-1) || "no-model";
 }
 
+export interface FooterSnapshot {
+  directory: string;
+  branch: string | null;
+  git: GitInfo | null;
+  pullRequest: PullRequestInfo | null;
+  modelName: string;
+  thinkingLevel?: string;
+  contextPercent: number;
+  contextWindow: number;
+  quotaWindows: readonly QuotaWindow[];
+  costs: SessionCosts;
+  sessionName?: string;
+}
+
+/** Align a logical row when it fits; otherwise wrap groups without discarding the right side. */
+function footerRow(
+  width: number,
+  leftVariants: string[],
+  rightVariants: string[],
+  groups: string[],
+): string[] {
+  for (const left of leftVariants) {
+    for (const right of rightVariants) {
+      const gap = width - visibleWidth(left) - visibleWidth(right);
+      if (gap >= (right ? 2 : 0)) return [left + " ".repeat(gap) + right];
+    }
+  }
+
+  const lines: string[] = [];
+  let line = "";
+  for (const group of groups.filter(Boolean)) {
+    if (line && visibleWidth(line) + 1 + visibleWidth(group) <= width) {
+      line += ` ${group}`;
+      continue;
+    }
+    if (line) lines.push(line);
+    const wrapped = wrapTextWithAnsi(group, width);
+    lines.push(...wrapped.slice(0, -1));
+    line = wrapped.at(-1) ?? "";
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+export function renderStatusFooter(
+  width: number,
+  data: FooterSnapshot,
+  palette: UiPalette,
+): string[] {
+  if (width <= 0) return ["", ""];
+  const inset = width >= 60 ? 1 : 0;
+  const available = width - inset * 2;
+  const { fg } = palette;
+  const dot = fg("muted", " · ");
+  const location = (limit: number) =>
+    fg("text", truncateToWidth(data.directory, limit, "…")) +
+    (data.branch
+      ? fg("muted", " @ ") + fg("lavender", truncateToWidth(data.branch, limit, "…"))
+      : "");
+  const gitParts: string[] = [];
+  if (data.git && data.branch) {
+    const git = data.git;
+    if (git.added + git.deleted > 0) {
+      gitParts.push(fg("added", `+${git.added}`), fg("deleted", `-${git.deleted}`));
+    }
+    if (git.untracked > 0) {
+      gitParts.push(fg("muted", `?${git.untracked}${git.untrackedTruncated ? "+" : ""}`));
+    }
+    if (data.pullRequest?.branch === data.branch) {
+      const color = {
+        failed: "error",
+        pending: "warning",
+        ready: "added",
+        merged: "lavender",
+        other: "muted",
+      } as const;
+      gitParts.push(fg(color[data.pullRequest.status], `#${data.pullRequest.number}`));
+    }
+    if (git.ahead > 0) gitParts.push(fg("muted", `↑${git.ahead}`));
+    if (git.behind > 0) gitParts.push(fg("muted", `↓${git.behind}`));
+  }
+  const gitText = gitParts.join(" ");
+  const fullLocation = location(available);
+  const compactLocation = location(18);
+  const fullLeft = [fullLocation, gitText].filter(Boolean).join(" ");
+  const compactLeft = [compactLocation, gitText].filter(Boolean).join(" ");
+  const leftVariants = [fullLeft, compactLeft];
+  if (data.sessionName && width >= 60) {
+    leftVariants.unshift(fullLeft + dot + fg("muted", data.sessionName));
+  }
+  const model =
+    fg("lavender", data.modelName) +
+    (data.thinkingLevel ? dot + palette.thinking(data.thinkingLevel) : "");
+
+  // Keep the historical headroom scale and thresholds: 80% real usage displays as 100%.
+  const pct = Math.min(100, Math.round((data.contextPercent * 100) / 80));
+  const contextColor = pct >= 80 ? "error" : pct >= 50 ? "warning" : "muted";
+  const contextValue =
+    fg(contextColor, `${pct}%`) + fg("muted", ` / ${formatWindow(data.contextWindow)}`);
+  const context = fg("muted", "context ") + contextValue;
+  const compactContext = fg("muted", "ctx ") + contextValue;
+  const quotas = data.quotaWindows.map(({ label, usedPercent }) => {
+    const color = usedPercent >= 95 ? "error" : usedPercent >= 70 ? "warning" : "muted";
+    return fg("muted", `${label} `) + fg(color, `${Math.round(usedPercent)}%`);
+  });
+  const { costs } = data;
+  const total =
+    costs.hasSubagents || costs.total > 0 ? fg("muted", `$${costs.total.toFixed(3)}`) : "";
+  const detailedCost = costs.hasSubagents
+    ? fg(
+        "muted",
+        `$${costs.total.toFixed(3)} total · $${costs.main.toFixed(3)} main · $${costs.subagents.toFixed(3)} agents`,
+      )
+    : total;
+  const telemetry = (cost: string) => [...quotas, cost].filter(Boolean).join(dot);
+
+  return [
+    ...footerRow(available, leftVariants, [model], [compactLocation, ...gitParts, model]),
+    ...footerRow(
+      available,
+      [context, compactContext],
+      [telemetry(detailedCost), telemetry(total)],
+      [compactContext, ...quotas, total],
+    ),
+  ].map((line) => " ".repeat(inset) + truncateToWidth(line, available, "…") + " ".repeat(inset));
+}
+
 export default function (pi: ExtensionAPI) {
   let requestQuotaRefresh: (() => void) | undefined;
   let requestFooterRender: (() => void) | undefined;
@@ -530,6 +660,7 @@ export default function (pi: ExtensionAPI) {
     if (ctx.mode !== "tui") return;
 
     ctx.ui.setFooter((tui, theme, footerData) => {
+      let currentTheme = theme;
       let quota: ProviderQuota | null = null;
       let pullRequest: PullRequestInfo | null = null;
       let quotaRequest = 0;
@@ -619,104 +750,29 @@ export default function (pi: ExtensionAPI) {
           if (requestQuotaRefresh === refreshQuota) requestQuotaRefresh = undefined;
           if (requestFooterRender === renderFooter) requestFooterRender = undefined;
         },
-        invalidate() {},
+        invalidate() {
+          currentTheme = ctx.ui.theme;
+        },
         render(width: number): string[] {
-          const sep = theme.fg("dim", " | ");
-          const parts: string[] = [];
-
-          const branch = footerData.getGitBranch();
           const git = gitStatus.current();
-          if (git) {
-            let folder = compactDirectory(git.dir);
-            if (branch) {
-              folder += theme.fg("dim", "@") + theme.fg("mdLink", branch);
-              if (pullRequest?.branch === branch) {
-                const color = {
-                  failed: "error",
-                  pending: "warning",
-                  ready: "success",
-                  merged: "accent",
-                  other: "dim",
-                } as const;
-                folder +=
-                  theme.fg("dim", " (") +
-                  theme.fg(color[pullRequest.status], `#${pullRequest.number}`) +
-                  theme.fg("dim", ")");
-              }
-              const ab: string[] = [];
-              if (git.ahead > 0) ab.push(theme.fg("success", `↑${git.ahead}`));
-              if (git.behind > 0) ab.push(theme.fg("warning", `↓${git.behind}`));
-              if (ab.length > 0) folder += ` ${ab.join("")}`;
-              const changes: string[] = [];
-              if (git.added + git.deleted > 0) {
-                changes.push(theme.fg("toolDiffAdded", `+${git.added}`));
-                changes.push(theme.fg("toolDiffRemoved", `-${git.deleted}`));
-              }
-              if (git.untracked > 0) {
-                const suffix = git.untrackedTruncated ? "+" : "";
-                changes.push(theme.fg("warning", `?${git.untracked}${suffix}`));
-              }
-              if (changes.length > 0) {
-                folder +=
-                  theme.fg("dim", " (") + changes.join(theme.fg("dim", " ")) + theme.fg("dim", ")");
-              }
-            }
-            parts.push(folder);
-          } else {
-            parts.push(basename(ctx.cwd));
-          }
-
-          let modelPart = modelDisplayName(ctx.model);
-          if (ctx.model?.reasoning && ctx.thinkingLevel) {
-            const level = ctx.thinkingLevel;
-            const colored =
-              level === "off" ? theme.fg("dim", "off") : theme.getThinkingBorderColor(level)(level);
-            modelPart += theme.fg("dim", " · ") + colored;
-          }
-          parts.push(modelPart);
-
           const usage = ctx.getContextUsage();
-          const window = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-          const pctReal = usage?.percent ?? 0;
-          const pct = Math.min(100, Math.round((pctReal * 100) / 80));
-          const filled = Math.min(10, Math.floor((pct * 10) / 100));
-          const barColor = pct >= 80 ? "error" : pct >= 50 ? "warning" : "success";
-          const bar =
-            theme.fg(barColor, "█".repeat(filled) + "░".repeat(10 - filled)) +
-            theme.fg(barColor, ` ${pct}%`) +
-            theme.fg("dim", ` / ${formatWindow(window)}`);
-          parts.push(bar);
-
-          const activeQuota = quota;
-          if (activeQuota && activeQuota.provider === ctx.model?.provider) {
-            const quotaPart = activeQuota.windows
-              .map(({ label, usedPercent }) => {
-                const color: "dim" | "warning" | "error" =
-                  usedPercent >= 95 ? "error" : usedPercent >= 70 ? "warning" : "dim";
-                return (
-                  theme.fg("dim", `${label} `) + theme.fg(color, `${Math.round(usedPercent)}%`)
-                );
-              })
-              .join(theme.fg("dim", " · "));
-            parts.push(quotaPart);
-          }
-
-          const costs = sessionCosts(ctx);
-          if (costs.hasSubagents) {
-            parts.push(
-              theme.fg(
-                "dim",
-                `$${costs.total.toFixed(3)} total · $${costs.main.toFixed(3)} main · $${costs.subagents.toFixed(3)} agents`,
-              ),
-            );
-          } else if (costs.total > 0) {
-            parts.push(theme.fg("dim", `$${costs.total.toFixed(3)}`));
-          }
-
-          const sessionName = ctx.sessionManager.getSessionName?.();
-          if (sessionName) parts.push(sessionName);
-
-          return [truncateToWidth(parts.join(sep), width, theme.fg("dim", "..."))];
+          return renderStatusFooter(
+            width,
+            {
+              directory: git ? compactDirectory(git.dir) : basename(ctx.cwd),
+              branch: footerData.getGitBranch(),
+              git,
+              pullRequest,
+              modelName: modelDisplayName(ctx.model),
+              thinkingLevel: ctx.model?.reasoning ? ctx.thinkingLevel : undefined,
+              contextPercent: usage?.percent ?? 0,
+              contextWindow: usage?.contextWindow ?? ctx.model?.contextWindow ?? 0,
+              quotaWindows: quota?.provider === ctx.model?.provider ? (quota?.windows ?? []) : [],
+              costs: sessionCosts(ctx),
+              sessionName: ctx.sessionManager.getSessionName?.(),
+            },
+            uiPalette(currentTheme),
+          );
         },
       };
     });
