@@ -30,8 +30,8 @@ importers:
         specifier: ^9.0.0
         version: 9.0.0
       typebox:
-        specifier: 1.3.23
-        version: 1.3.23
+        specifier: 1.3.26
+        version: 1.3.26
       zod:
         specifier: 4.5.4
         version: 4.5.4
@@ -1526,8 +1526,8 @@ packages:
     resolution: {integrity: sha512-faYHw0anBbc/kWF3zFTEnxSFOAGUX9GFbOBthvDdLsIlEoWOFOtS0zgCiQYwIskL9iGXZL3kAXD8OoZ4GmMATA==}
     engines: {node: '>= 18'}
 
-  typebox@1.3.23:
-    resolution: {integrity: sha512-eMDZIb3EhHxm/tQ+xfbb++B+1KMpquxYoRQ0nHWukMmNxrYHsbRQwW15chb2doi0FdJ/MxDXpgZRFJUyizMkkw==}
+  typebox@1.3.26:
+    resolution: {integrity: sha512-ey7mwY4ZDw0e0cEv2apwJq7jdMdUEZF1zpNLsHF5G4nY2w/Q+qPGt3ZvbxWml2H2yFYjZ20B/0j8ezny7xHUGg==}
 
   typebox@1.3.7:
     resolution: {integrity: sha512-meKuifc33Pccx0O6PdIzYMq3Og8zvP4TIi/a+Bw3AEMZMxOD0+RHGQvpglEe6Zdy3wZ8nqn/j95h8LUZLk/6Hg==}
@@ -2983,7 +2983,7 @@ snapshots:
       media-typer: 1.1.1
       mime-types: 3.0.2
 
-  typebox@1.3.23: {}
+  typebox@1.3.26: {}
 
   typebox@1.3.7: {}
 
