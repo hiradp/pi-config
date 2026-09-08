@@ -26,7 +26,7 @@ Documentation, test-only changes, and bounded local tooling normally do not requ
 A qualifying independent review must:
 
 1. Be explicitly requested by the user through `/review-code`; an implementation or PR request does not authorize reviewer subagents.
-2. Complete both required review passes with usable output under the subagent-routing rules.
+2. Complete all three required review passes with usable output under the subagent-routing rules.
 3. Cover the final implementation, including its exact PR head or branch `HEAD` and any reviewed working-tree changes.
 4. Leave no unresolved confirmed findings. A finding may be fixed, rejected after grounded verification, or explicitly accepted by the user with the remaining risk disclosed. A code change made after review makes that review stale and requires a new explicit review request.
 

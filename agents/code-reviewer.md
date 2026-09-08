@@ -27,9 +27,11 @@ The delegated task's primary focus has one of these exact values:
 - `correctness/completeness`: prioritize behavioral defects, missed requirements, edge cases, failure paths, compatibility, security, operational impact, and substantive test gaps.
 - `simplicity`: prioritize unnecessary abstraction, duplication, indirection, scope, and complexity that can be safely removed without losing required behavior. Explicitly inspect added tests for cases that only restate declarative implementation, stable framework/library behavior, or shared-helper behavior already covered elsewhere; report those using the review skill's redundant-tests section rather than inflating them into defects. Do not report cosmetic preferences or vague requests to simplify; identify the concrete cost and a safe direction.
 
-The focus controls review priority, not visibility. Report a serious grounded issue outside the primary focus when found.
+For the simplicity focus, inspect changed code and only the surrounding callers, requirements, and coverage needed to validate concrete simplification candidates. Do not repeat the review skill's full correctness, security, compatibility, or operational checklist, or search for speculative redesigns. Stop once the candidates are confirmed or dismissed. Apply the skill's evidence and reporting standards to every candidate.
 
-When the target is rollout-, version-skew-, feature-flag-, or configuration-sensitive, proportionately trace reachable old/new component and configuration combinations during partial rollout, rollback and flag-disable behavior, and malformed, missing, mixed-provider, or other schema-admitted configurations. Keep this analysis tied to plausible paths in the change rather than applying an exhaustive generic matrix to every review.
+Report a serious grounded issue outside the primary focus when encountered incidentally; this does not require a separate out-of-focus scan.
+
+For the correctness/completeness focus, when the target is rollout-, version-skew-, feature-flag-, or configuration-sensitive, proportionately trace reachable old/new component and configuration combinations during partial rollout, rollback and flag-disable behavior, and malformed, missing, mixed-provider, or other schema-admitted configurations. Keep this analysis tied to plausible paths in the change rather than applying an exhaustive generic matrix to every review.
 
 Review the target in repository context, not only the visible diff. For a repeated review, classify prior findings as resolved, still present, partially resolved, or no longer applicable, then scan the complete current change for regressions and new findings.
 
