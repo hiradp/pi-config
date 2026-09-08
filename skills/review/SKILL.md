@@ -137,6 +137,23 @@ Use this format:
 Explain the concrete failing path, why existing protection is insufficient, and the resulting impact. Include a brief direction for correction without writing a full patch unless requested.
 ```
 
+### Markdown formatting
+
+Write the review as GitHub-flavored Markdown that remains usable when copied to GitHub:
+
+- Use actual `##` section headings and `###` finding headings, not plain-text labels such as `Findings` or `Review coverage`.
+- Start headings, paragraphs, and top-level lists at column one. Use blank lines between blocks; indent only nested list content or intentional code blocks.
+- Wrap identifiers, API names, commands, and file references in backticks, including references in explanations and redundant-test entries.
+- For PR reviews, make source references clickable with repository blob URLs pinned to the reviewed commit and exact line anchors. Link the inline-code path rather than leaving a bare `path:line` reference. For example:
+
+  ```markdown
+  ### [P2] Concise defect title — [`pkg/controller/example.go:100–103`](https://github.com/OWNER/REPO/blob/HEAD_SHA/pkg/controller/example.go#L100-L103)
+  ```
+
+  Substitute the actual repository, reviewed commit SHA, path, and line range; never emit placeholders. Use the base SHA for references to removed code and label them as such.
+- Do not wrap the whole review in a code fence by default. If the user asks for copyable Markdown, put the complete review in one fenced `markdown` block so heading markers, backticks, and link destinations survive copying rendered output; the fence itself is not part of the review body.
+- Before returning, check the raw Markdown for missing heading markers, stripped backticks, accidental indentation, and unlinked PR source references. This formatting check does not authorize posting or editing anything on GitHub.
+
 Every finding must include:
 
 - one severity;
