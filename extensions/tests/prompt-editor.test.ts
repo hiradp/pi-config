@@ -41,7 +41,7 @@ test("the prompt gutter preserves wrapped cursor positioning and vertical editin
   input.setText("abcdefghijk");
   let lines = input.render(12);
   assert.equal(cursorColumn(lines), 6);
-  assert.match(strip(lines[1]!), /^ › abcdefgh/u);
+  assert.match(strip(lines[1]!), /^ λ abcdefgh/u);
 
   input.handleInput("X");
   input.render(12);
@@ -64,13 +64,13 @@ test("only the marker changes for bash mode and light mode keeps a readable prom
   input.setText("hello");
   const ordinary = input.render(40);
   assert.ok(ordinary[0]!.includes(dark.ansi.border));
-  assert.ok(ordinary[1]!.includes(dark.fg("prompt", "›")));
+  assert.ok(ordinary[1]!.includes(dark.fg("prompt", "λ")));
   // Pi's thinking/bashing border assignments must not recolor the whole frame.
   input.borderColor = () => "LOUD";
   input.setText("!git status");
   const bash = input.render(40);
   assert.equal(bash[0], ordinary[0]);
-  assert.ok(bash[1]!.includes(dark.fg("warning", "›")));
+  assert.ok(bash[1]!.includes(dark.fg("warning", "λ")));
   assert.equal(input.getText(), "!git status");
 
   setTheme("rustic-light");

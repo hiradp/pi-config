@@ -20,7 +20,7 @@ export class RadEditor extends CustomEditor {
     const palette = uiPalette(this.getTheme());
     // Pi's word wrapper needs room for a wide glyph; smaller layouts recurse.
     const minWidth = Math.max(3, this.getPaddingX() * 2 + 2);
-    if (width < minWidth) return [palette.fg("muted", truncateToWidth("›", width, ""))];
+    if (width < minWidth) return [palette.fg("muted", truncateToWidth("λ", width, ""))];
     const gutter = width >= minWidth + 2 ? 2 : 0;
     const borderColor = this.borderColor;
     let lines: string[];
@@ -34,7 +34,7 @@ export class RadEditor extends CustomEditor {
     }
 
     let inEditor = true;
-    const marker = palette.fg(this.getText().startsWith("!") ? "warning" : "prompt", "›");
+    const marker = palette.fg(this.getText().startsWith("!") ? "warning" : "prompt", "λ");
     return lines.map((line, index) => {
       const border = line.startsWith(palette.ansi.border);
       if (border && index > 0) inEditor = false;
