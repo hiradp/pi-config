@@ -5,10 +5,15 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { metalHeaderLines } from "../ui/header.ts";
 
-const theme = {
-  fg: (_color: string, text: string) => text,
-  bold: (text: string) => text,
-} as unknown as Theme;
+function headerTheme(name = "dark"): Theme {
+  return {
+    name,
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+}
+
+const theme = headerTheme();
 
 test("metal header stays within the terminal width", () => {
   for (const version of ["test", "long-version".repeat(10)]) {
@@ -23,6 +28,24 @@ test("metal header stays within the terminal width", () => {
 test("metal header adapts its identity to available space", () => {
   assert.match(metalHeaderLines(theme, 80, "test").join("\n"), /pi vtest/);
   assert.deepEqual(metalHeaderLines(theme, 12, "test").map(stripVTControlCharacters), ["     Pi"]);
+});
+
+test("metal header uses olive in light themes without changing the dark neon or artwork", () => {
+  const neon = "\x1b[38;2;182;255;0m";
+  const olive = "\x1b[38;2;83;105;0m";
+  const purple = "\x1b[38;2;148;56;201m";
+
+  for (const width of [12, 80]) {
+    const dark = metalHeaderLines(theme, width, "test").join("\n");
+    assert.ok(dark.includes(neon));
+    for (const name of ["light", "rustic-light"]) {
+      const light = metalHeaderLines(headerTheme(name), width, "test").join("\n");
+      assert.ok(light.includes(olive));
+      assert.ok(!light.includes(neon));
+      assert.equal(stripVTControlCharacters(light), stripVTControlCharacters(dark));
+      if (width === 80) assert.ok(light.includes(`${purple}_${olive}`));
+    }
+  }
 });
 
 test("full metal header centers the unboxed artwork without straightening its slant", () => {

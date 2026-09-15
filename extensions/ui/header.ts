@@ -2,11 +2,11 @@ import { VERSION, type ExtensionAPI, type Theme } from "@earendil-works/pi-codin
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { StartupLoadout } from "./loadout-resources.ts";
 import { loadoutLines, LoadoutView } from "./loadout.ts";
+import { uiPalette } from "./palette.ts";
 
-const SLIME = "\x1b[38;2;182;255;0m";
 const PURPLE = "\x1b[38;2;148;56;201m";
 const RESET_FG = "\x1b[39m";
-const cut = (text: string) => `${PURPLE}${text}${SLIME}`;
+const cut = (text: string) => `${PURPLE}${text}${RESET_FG}`;
 
 const LOGO = [
   "    ____  ____",
@@ -24,7 +24,7 @@ function center(text: string, width: number): string {
 }
 
 function lettering(theme: Theme, text: string): string {
-  return theme.bold(`${SLIME}${text}${RESET_FG}`);
+  return theme.bold(uiPalette(theme).fg("prompt", text));
 }
 
 export function metalHeaderLines(theme: Theme, width: number, version = VERSION): string[] {
