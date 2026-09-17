@@ -5,6 +5,7 @@
 !/.stow-local-ignore
 !/.oxfmtrc.json
 !/AGENTS.md
+!/APPEND_SYSTEM.md
 !/LICENSE
 !/README.md
 !/keybindings.json
