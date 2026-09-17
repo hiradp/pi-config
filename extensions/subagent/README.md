@@ -1,6 +1,6 @@
 # Subagent
 
-This customized extension is based on Pi's official [subagent example](https://github.com/earendil-works/pi-mono/tree/main/packages/coding-agent/examples/extensions/subagent) and is maintained against Pi version 0.84.4.
+This customized extension is based on Pi's official [subagent example](https://github.com/earendil-works/pi-mono/tree/main/packages/coding-agent/examples/extensions/subagent) and is maintained against Pi version 0.85.1.
 
 It adds a `subagent` tool that can run user-defined agents in isolated Pi processes, either individually, in parallel, or as a chain. Each invocation may select a model; selection precedence is invocation, agent definition, then the dispatching session. Usage from child model calls is included in parent-session accounting, and any failed child marks the complete tool result as failed while preserving its diagnostics.
 
@@ -12,7 +12,28 @@ Children never receive the `subagent` or `claude` tools, and they carry a `PI_SU
 
 Project-local agents (`agentScope: "project"` or `"both"`) run only when Pi's project trust is active and the user confirms them in the UI; a headless session refuses them, and a project agent never replaces a user agent of the same name.
 
-While children are active, the tool renders a stable dashboard with queued/running/completed/failed states, each child's responsibility, latest action, elapsed time, turns, output tokens, cost, and model. Calls may provide a short `label`; otherwise the task text identifies the responsibility. Running labels use the same shimmer as Pi's working message without adding a dashboard timer, so they reuse the working row's existing repaints. Completed output stays collapsed until the tool-detail keybinding is used.
+While children are active, the tool renders a dashboard with queued/running/completed/failed states, each child's responsibility, total elapsed time, turns, output tokens, cost, and model. Calls may provide a short `label`; otherwise the task text identifies the responsibility.
+
+## Live visibility
+
+No extra command is needed. The compact dashboard shows the current operation and its duration separately from total runtime: waiting for or receiving a model response, running tools, compacting, retrying, or finishing. It also shows time since the last child JSON event. Multiple simultaneous tools are tracked independently; one finishing does not make the others look idle.
+
+Each child has its own collapsible card inside the tool output. In **fullscreen mode**, click a card's header to expand or collapse only that child. The normal tool-detail keybinding (**Ctrl+O** by default) expands or collapses all cards, including in regular terminal mode where Pi does not receive mouse clicks.
+
+Cards follow the global expansion setting initially. Individual choices survive streaming updates, terminal resizing, and completion; changing the global expansion setting resets those choices. Cards stay in dispatch order, even when several children use the same agent. Clicking inside an output body does not toggle the group, and scrolling/drag selection is left to Pi. Failures remain visible even in collapsed cards. Expansion choices are temporary UI state, not saved across reloads.
+
+Expand a running child's card to see:
+
+- The actual assigned task, including substituted input in a chain.
+- The five most recently completed tools and up to five active tools, with durations and outcomes. Additional active tools are counted.
+- Text output tails from those tools, where the tool supplies partial output.
+- The latest assistant text, including text still streaming. Reasoning content is not displayed.
+
+Each output/text preview keeps at most six lines and 4096 characters; long lines are clipped to terminal width. These are tails, not full logs. Tool output can contain sensitive information, just as it can in the main session. Terminal control sequences are removed before display. When a child finishes, its open card shows the full final answer as Markdown, tool calls, and usage instead of live previews. It does not automatically collapse, and other cards keep their state.
+
+After 90 seconds of silence, the dashboard says **No events received for ...**, not that the child is stuck. A quiet command or provider can legitimately produce no events. The clock refreshes once a second, and event-driven updates are throttled to avoid repainting on every token. These timers stop when the child exits. Streaming previews do not contribute to token/cost accounting; finalized usage remains authoritative.
+
+This changes visibility only: it adds no steering, per-child cancellation, automatic retries, or inactivity termination. The existing dispatch, review authorization, wall-clock timeout, and process-cleanup rules are unchanged.
 
 ## Local agents
 

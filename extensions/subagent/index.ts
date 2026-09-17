@@ -38,11 +38,14 @@ import {
   stripTerminalSequences,
   Text,
   truncateToWidth,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { SHIMMER_INTERVAL_MS, shimmerText } from "../ui/shimmer.ts";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { type ChildProgress, ChildProgressTracker, previewTail } from "./progress.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -176,6 +179,7 @@ function formatToolCall(
   toolName: string,
   args: Record<string, unknown>,
   themeFg: (color: any, text: string) => string,
+  commandLimit = 60,
 ): string {
   const shortenPath = (value: string) => {
     const p = singleLine(value);
@@ -187,7 +191,8 @@ function formatToolCall(
   switch (toolName) {
     case "bash": {
       const command = singleLine(stringArg(args.command, "..."));
-      const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
+      const preview =
+        command.length > commandLimit ? `${command.slice(0, commandLimit)}...` : command;
       return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
     }
     case "read": {
@@ -330,6 +335,7 @@ interface SingleResult {
   agent: string;
   agentSource: "user" | "project" | "unknown";
   task: string;
+  assignedTask?: string;
   label?: string;
   exitCode: number;
   messages: Message[];
@@ -345,6 +351,7 @@ interface SingleResult {
   step?: number;
   startedAt?: number;
   completedAt?: number;
+  progress?: ChildProgress;
 }
 
 interface SubagentDetails {
@@ -694,12 +701,43 @@ function latestDisplayItem(messages: Message[]): DisplayItem | undefined {
   return undefined;
 }
 
-function latestActivity(result: SingleResult, status: SubagentStatus, theme: Theme): string {
+function latestActivity(
+  result: SingleResult,
+  status: SubagentStatus,
+  theme: Theme,
+  now: number,
+): string {
   if (status === "queued") return theme.fg("dim", "waiting");
   if (status === "completed") return theme.fg("success", "complete");
   if (status === "failed") {
     const error = singleLine(result.errorMessage || result.stderr || result.stopReason || "failed");
     return theme.fg("error", error);
+  }
+
+  const progress = result.progress;
+  if (progress) {
+    const tool = progress.activeTools[0];
+    if (tool) {
+      const others =
+        progress.activeToolCount > 1 ? ` (+${progress.activeToolCount - 1} running)` : "";
+      return theme.fg(
+        "muted",
+        `Running for ${formatElapsed(now - tool.startedAt)}${others}: ${singleLine(tool.description)}`,
+      );
+    }
+    const phases = {
+      starting: "Starting",
+      waiting: "Waiting for model response",
+      receiving: "Receiving model response",
+      tools: "Running tools",
+      compacting: "Compacting context",
+      retrying: "Waiting to retry",
+      finishing: "Finishing",
+    };
+    return theme.fg(
+      "muted",
+      `${phases[progress.phase]} · ${formatElapsed(now - progress.phaseStartedAt)}`,
+    );
   }
 
   const latest = latestDisplayItem(result.messages);
@@ -715,29 +753,124 @@ function responsibilityLabel(result: SingleResult): string {
   return singleLine(result.label || task) || singleLine(result.agent);
 }
 
-function addFailureDiagnostic(container: Container, result: SingleResult, theme: Theme): void {
-  if (!isFailedResult(result)) return;
-  const diagnostic = result.errorMessage || result.stderr || result.stopReason;
-  if (diagnostic) {
-    container.addChild(new Text(theme.fg("error", `Error: ${singleLine(diagnostic)}`), 0, 0));
-  }
-}
-
 class SubagentDashboard implements Component {
   private details: SubagentDetails;
   private active: boolean;
   private theme: Theme;
+  private expanded: boolean;
+  // Results stay in dispatch order, even when several children use the same agent.
+  private cardExpansion = new Map<number, boolean>();
+  private headerRows = new Map<number, number>();
 
-  constructor(details: SubagentDetails, active: boolean, theme: Theme) {
+  constructor(details: SubagentDetails, active: boolean, theme: Theme, expanded = false) {
     this.details = details;
     this.active = active;
     this.theme = theme;
+    this.expanded = expanded;
   }
 
-  update(details: SubagentDetails, active: boolean, theme: Theme): void {
+  update(details: SubagentDetails, active: boolean, theme: Theme, expanded = false): void {
     this.details = details;
     this.active = active;
     this.theme = theme;
+    if (this.expanded !== expanded) this.cardExpansion.clear();
+    this.expanded = expanded;
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type !== "click" || event.button !== "left") return undefined;
+    const index = this.headerRows.get(event.y);
+    if (index !== undefined) {
+      this.cardExpansion.set(index, !(this.cardExpansion.get(index) ?? this.expanded));
+      return { handled: true, render: true };
+    }
+    // Pi wraps tool output in a whole-result click toggle. Body clicks must not bubble to it.
+    return { handled: true, render: false };
+  }
+
+  private completedLines(result: SingleResult, width: number): string[] {
+    const container = new Container();
+    const identity = `${this.details.mode === "chain" ? `Step ${result.step}: ` : ""}${singleLine(result.agent)} (${singleLine(result.agentSource)})`;
+    container.addChild(new Text(this.theme.fg("muted", identity), 0, 0));
+    container.addChild(new Text(this.theme.fg("muted", "─── Task ───"), 0, 0));
+    container.addChild(new Text(sanitizeTaskText(result.assignedTask ?? result.task), 0, 0));
+
+    if (resultStatus(result) === "queued") {
+      container.addChild(
+        new Text(this.theme.fg("dim", this.active ? "(queued)" : "(not run)"), 0, 0),
+      );
+    } else {
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(this.theme.fg("muted", "─── Output ───"), 0, 0));
+      const items = getDisplayItems(result.messages);
+      const output = getFinalOutput(result.messages);
+      if (items.length === 0 && !output) {
+        container.addChild(new Text(this.theme.fg("muted", "(no output)"), 0, 0));
+      }
+      for (const item of items) {
+        if (item.type === "toolCall") {
+          container.addChild(
+            new Text(
+              this.theme.fg("muted", "→ ") +
+                formatToolCall(item.name, item.args, this.theme.fg.bind(this.theme)),
+              0,
+              0,
+            ),
+          );
+        }
+      }
+      if (output) {
+        container.addChild(new Spacer(1));
+        container.addChild(new Markdown(sanitizeTaskText(output).trim(), 0, 0, getMarkdownTheme()));
+      }
+      const usage = formatUsageStats(result.usage, result.model);
+      if (usage) container.addChild(new Text(this.theme.fg("dim", usage), 0, 0));
+    }
+    return container
+      .render(Math.max(1, width - 4))
+      .map((line) => truncateToWidth(`    ${line}`, width, "…"));
+  }
+
+  private expandedLines(result: SingleResult, width: number, now: number): string[] {
+    const lines = [this.theme.fg("muted", "    ─── Task ───")];
+    lines.push(
+      ...new Text(sanitizeTaskText(result.assignedTask ?? result.task), 2, 0).render(width),
+    );
+    const progress = result.progress;
+    if (progress) {
+      for (const tool of [...progress.recentTools, ...progress.activeTools]) {
+        const status = tool.finishedAt === undefined ? "running" : tool.isError ? "error" : "ok";
+        const duration = formatElapsed((tool.finishedAt ?? now) - tool.startedAt);
+        lines.push(
+          this.theme.fg(
+            tool.isError ? "error" : "muted",
+            `    ${status} · ${duration} · ${singleLine(tool.description)}`,
+          ),
+        );
+        if (tool.output) {
+          lines.push(this.theme.fg("dim", "      Output tail:"));
+          lines.push(
+            ...sanitizeTaskText(tool.output)
+              .split("\n")
+              .map((line) => `      ${line}`),
+          );
+        } else if (tool.finishedAt === undefined) {
+          lines.push(this.theme.fg("dim", "      No output reported yet"));
+        }
+      }
+      const hidden = progress.activeToolCount - progress.activeTools.length;
+      if (hidden > 0) lines.push(this.theme.fg("dim", `    ${hidden} more tools running`));
+    }
+    const assistantText = progress?.assistantText || previewTail(getFinalOutput(result.messages));
+    if (assistantText) {
+      lines.push(this.theme.fg("muted", "    ─── Latest assistant text (tail) ───"));
+      lines.push(
+        ...sanitizeTaskText(assistantText)
+          .split("\n")
+          .map((line) => `    ${line}`),
+      );
+    }
+    return lines.map((line) => truncateToWidth(line, width, "…"));
   }
 
   render(width: number): string[] {
@@ -772,6 +905,7 @@ class SubagentDashboard implements Component {
       ),
     ];
     const shimmerTick = Math.floor(now / SHIMMER_INTERVAL_MS);
+    this.headerRows.clear();
 
     for (let index = 0; index < this.details.results.length; index++) {
       const result = this.details.results[index];
@@ -790,24 +924,65 @@ class SubagentDashboard implements Component {
         status === "running"
           ? shimmerText(fittedLabel, this.theme, shimmerTick)
           : this.theme.fg(status === "queued" ? "dim" : "toolTitle", fittedLabel);
-      const left = `  ${statusIcon} ${label}`;
+      const cardExpanded = this.cardExpansion.get(index) ?? this.expanded;
+      const disclosure = this.theme.fg("muted", cardExpanded ? "▼" : "▶");
+      const left = `  ${disclosure} ${statusIcon} ${label}`;
       const statsText = [singleLine(result.agent), resultStats(result, status, now)]
         .filter(Boolean)
         .join(" · ");
+      lines.push("");
+      this.headerRows.set(lines.length, index);
       lines.push(fitColumns(left, this.theme.fg("dim", statsText), width));
 
       if (status === "running") {
         lines.push(
-          truncateToWidth(`    ${latestActivity(result, status, this.theme)}`, width, "…"),
+          truncateToWidth(`    ${latestActivity(result, status, this.theme, now)}`, width, "…"),
+        );
+        if (result.progress) {
+          const since = Math.max(0, now - (result.progress.lastEventAt ?? result.startedAt ?? now));
+          const quiet = since >= 90_000;
+          const text =
+            quiet || result.progress.lastEventAt === undefined
+              ? `No events received for ${formatElapsed(since)}`
+              : `Last event ${formatElapsed(since)} ago`;
+          lines.push(
+            truncateToWidth(`    ${this.theme.fg(quiet ? "warning" : "dim", text)}`, width, "…"),
+          );
+        }
+      }
+      if (status === "failed") {
+        lines.push(
+          truncateToWidth(
+            `    ${this.theme.fg("error", `Error: ${singleLine(result.errorMessage || result.stderr || result.stopReason || "failed")}`)}`,
+            width,
+            "…",
+          ),
+        );
+      }
+      if (cardExpanded) {
+        lines.push(
+          ...(status === "running"
+            ? this.expandedLines(result, width, now)
+            : this.completedLines(result, width)),
         );
       }
     }
 
-    if (!this.active) {
-      lines.push(
-        truncateToWidth(this.theme.fg("dim", `${keyText("app.tools.expand")} details`), width, "…"),
-      );
+    if (!this.active && this.details.results.length > 1) {
+      const usage = formatUsageStats(combineUsageStats(this.details.results));
+      if (usage) lines.push(truncateToWidth(this.theme.fg("dim", `Total: ${usage}`), width, "…"));
     }
+    lines.push("");
+    lines.push(
+      truncateToWidth(
+        this.theme.fg(
+          "dim",
+          `${keyText("app.tools.expand")} ${this.expanded ? "collapse all" : "expand all"} · click a header (fullscreen)`,
+        ),
+        width,
+        "…",
+      ),
+    );
     return lines;
   }
 
@@ -1204,12 +1379,31 @@ async function runSingleAgent(
     startedAt: Date.now(),
   };
 
+  const progress = new ChildProgressTracker(currentResult.startedAt!, (name, args) =>
+    formatToolCall(name, args, (_color, value) => value, 4096),
+  );
+  currentResult.progress = progress.snapshot();
+  let updateTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastUpdateAt = 0;
   const emitUpdate = () => {
+    if (updateTimer) clearTimeout(updateTimer);
+    updateTimer = undefined;
+    lastUpdateAt = Date.now();
     if (onUpdate) {
       onUpdate({
         content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
         details: makeDetails([currentResult]),
       });
+    }
+  };
+
+  const scheduleUpdate = () => {
+    if (!onUpdate || updateTimer) return;
+    const remaining = 250 - (Date.now() - lastUpdateAt);
+    if (remaining <= 0) emitUpdate();
+    else {
+      updateTimer = setTimeout(emitUpdate, remaining);
+      updateTimer.unref?.();
     }
   };
 
@@ -1222,6 +1416,9 @@ async function runSingleAgent(
   }
 
   emitUpdate();
+  // Refresh elapsed/silence counters even when the child sends no events.
+  const clockTimer = onUpdate ? setInterval(scheduleUpdate, 1000) : undefined;
+  clockTimer?.unref?.();
 
   try {
     if (agent.systemPrompt.trim()) {
@@ -1247,6 +1444,8 @@ async function runSingleAgent(
       timeoutMs: runOptions.timeoutMs,
       registry: runOptions.registry,
       onEvent: (event) => {
+        progress.record(event);
+        currentResult.progress = progress.snapshot();
         if (event.type === "message_end" && event.message) {
           const msg = event.message as Message;
           currentResult.messages.push(msg);
@@ -1264,12 +1463,12 @@ async function runSingleAgent(
           } else if (msg.role === "toolResult" && msg.usage) {
             addUsage(currentResult.usage.total, msg.usage);
           }
-          emitUpdate();
         }
 
         if (event.type === "compaction_end" && event.result?.usage) {
           addUsage(currentResult.usage.total, event.result.usage as Usage);
         }
+        scheduleUpdate();
       },
     });
 
@@ -1302,6 +1501,8 @@ async function runSingleAgent(
     currentResult.completedAt = Date.now();
     return currentResult;
   } finally {
+    if (updateTimer) clearTimeout(updateTimer);
+    if (clockTimer) clearInterval(clockTimer);
     if (tmpPromptPath)
       try {
         fs.unlinkSync(tmpPromptPath);
@@ -1534,6 +1735,7 @@ export default function (
                 if (currentResult) {
                   allResults[i] = {
                     ...currentResult,
+                    assignedTask: taskWithContext,
                     task: step.task,
                     label: step.label,
                   };
@@ -1560,6 +1762,7 @@ export default function (
             makeDetails("chain"),
             runOptions,
           );
+          result.assignedTask = taskWithContext;
           result.task = step.task;
           result.label = step.label;
           allResults[i] = result;
@@ -1785,206 +1988,12 @@ export default function (
           const status = resultStatus(child);
           return status === "queued" || status === "running";
         });
-      if (!expanded || active) {
-        const dashboard =
-          context.lastComponent instanceof SubagentDashboard
-            ? context.lastComponent
-            : new SubagentDashboard(details, active, theme);
-        dashboard.update(details, active, theme);
-        return dashboard;
-      }
-
-      const mdTheme = getMarkdownTheme();
-
-      if (details.mode === "single" && details.results.length === 1) {
-        const r = details.results[0];
-        const isError = isFailedResult(r);
-        const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-        const displayItems = getDisplayItems(r.messages);
-        const finalOutput = getFinalOutput(r.messages);
-
-        const container = new Container();
-        let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-        if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
-        container.addChild(new Text(header, 0, 0));
-        addFailureDiagnostic(container, r, theme);
-        container.addChild(new Spacer(1));
-        container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
-        container.addChild(new Text(theme.fg("dim", sanitizeTaskText(r.task)), 0, 0));
-        container.addChild(new Spacer(1));
-        container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
-        if (displayItems.length === 0 && !finalOutput) {
-          container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
-        } else {
-          for (const item of displayItems) {
-            if (item.type === "toolCall")
-              container.addChild(
-                new Text(
-                  theme.fg("muted", "→ ") +
-                    formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-                  0,
-                  0,
-                ),
-              );
-          }
-          if (finalOutput) {
-            container.addChild(new Spacer(1));
-            container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-          }
-        }
-        const usageStr = formatUsageStats(r.usage, r.model);
-        if (usageStr) {
-          container.addChild(new Spacer(1));
-          container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
-        }
-        return container;
-      }
-
-      if (details.mode === "chain") {
-        const successCount = details.results.filter((r) => resultStatus(r) === "completed").length;
-        const icon =
-          successCount === details.results.length
-            ? theme.fg("success", "✓")
-            : theme.fg("error", "✗");
-
-        const container = new Container();
-        container.addChild(
-          new Text(
-            icon +
-              " " +
-              theme.fg("toolTitle", theme.bold("chain ")) +
-              theme.fg("accent", `${successCount}/${details.results.length} steps`),
-            0,
-            0,
-          ),
-        );
-
-        for (const r of details.results) {
-          const rIcon =
-            resultStatus(r) === "queued"
-              ? theme.fg("dim", "–")
-              : isFailedResult(r)
-                ? theme.fg("error", "✗")
-                : theme.fg("success", "✓");
-          const displayItems = getDisplayItems(r.messages);
-          const finalOutput = getFinalOutput(r.messages);
-
-          container.addChild(new Spacer(1));
-          container.addChild(
-            new Text(
-              `${theme.fg("muted", `─── Step ${r.step}: `) + theme.fg("accent", r.agent)} ${rIcon}`,
-              0,
-              0,
-            ),
-          );
-          container.addChild(
-            new Text(theme.fg("muted", "Task: ") + theme.fg("dim", sanitizeTaskText(r.task)), 0, 0),
-          );
-          if (resultStatus(r) === "queued") {
-            container.addChild(new Text(theme.fg("dim", "(not run)"), 0, 0));
-          } else {
-            addFailureDiagnostic(container, r, theme);
-          }
-
-          // Show tool calls
-          for (const item of displayItems) {
-            if (item.type === "toolCall") {
-              container.addChild(
-                new Text(
-                  theme.fg("muted", "→ ") +
-                    formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-                  0,
-                  0,
-                ),
-              );
-            }
-          }
-
-          // Show final output as markdown
-          if (finalOutput) {
-            container.addChild(new Spacer(1));
-            container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-          }
-
-          const stepUsage = formatUsageStats(r.usage, r.model);
-          if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
-        }
-
-        const usageStr = formatUsageStats(combineUsageStats(details.results));
-        if (usageStr) {
-          container.addChild(new Spacer(1));
-          container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
-        }
-        return container;
-      }
-
-      if (details.mode === "parallel") {
-        const successCount = details.results.filter(
-          (r) => r.exitCode !== -1 && !isFailedResult(r),
-        ).length;
-        const failCount = details.results.filter(
-          (r) => r.exitCode !== -1 && isFailedResult(r),
-        ).length;
-        const icon = failCount > 0 ? theme.fg("error", "×") : theme.fg("success", "✓");
-        const status = `${successCount}/${details.results.length} tasks`;
-
-        const container = new Container();
-        container.addChild(
-          new Text(
-            `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`,
-            0,
-            0,
-          ),
-        );
-
-        for (const r of details.results) {
-          const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
-          const displayItems = getDisplayItems(r.messages);
-          const finalOutput = getFinalOutput(r.messages);
-
-          container.addChild(new Spacer(1));
-          container.addChild(
-            new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
-          );
-          container.addChild(
-            new Text(theme.fg("muted", "Task: ") + theme.fg("dim", sanitizeTaskText(r.task)), 0, 0),
-          );
-          addFailureDiagnostic(container, r, theme);
-
-          // Show tool calls
-          for (const item of displayItems) {
-            if (item.type === "toolCall") {
-              container.addChild(
-                new Text(
-                  theme.fg("muted", "→ ") +
-                    formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-                  0,
-                  0,
-                ),
-              );
-            }
-          }
-
-          // Show final output as markdown
-          if (finalOutput) {
-            container.addChild(new Spacer(1));
-            container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-          }
-
-          const taskUsage = formatUsageStats(r.usage, r.model);
-          if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
-        }
-
-        const usageStr = formatUsageStats(combineUsageStats(details.results));
-        if (usageStr) {
-          container.addChild(new Spacer(1));
-          container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
-        }
-        return container;
-      }
-
-      const text = result.content[0];
-      return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+      const dashboard =
+        context.lastComponent instanceof SubagentDashboard
+          ? context.lastComponent
+          : new SubagentDashboard(details, active, theme, expanded);
+      dashboard.update(details, active, theme, expanded);
+      return dashboard;
     },
   });
 }

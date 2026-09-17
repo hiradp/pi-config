@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { Usage } from "@earendil-works/pi-ai";
+import type { ChildProgress } from "../subagent/progress.ts";
 import {
   CONFIG_DIR_NAME,
   type ExtensionAPI,
@@ -26,9 +28,9 @@ type Execute = (
   toolCallId: string,
   params: Record<string, unknown>,
   signal: AbortSignal | undefined,
-  onUpdate: undefined,
+  onUpdate: ((result: { details?: unknown }) => void) | undefined,
   ctx: ExtensionContext,
-) => Promise<{ content: Array<{ type: string; text?: string }>; details: unknown }>;
+) => Promise<{ content: Array<{ type: string; text?: string }>; details: unknown; usage?: Usage }>;
 
 type Schema = { properties: Record<string, unknown> };
 
@@ -447,6 +449,82 @@ test("dispatch reports children without a usable final response as failed", asyn
     fixture.cleanup();
   }
 });
+
+test(
+  "publishes live output before the child exits without counting streaming usage twice",
+  { timeout: 10000 },
+  async () => {
+    const fixture = agentFixture(["worker"], []);
+    const script = join(fixture.projectDir, "streaming-pi.cjs");
+    const release = join(fixture.projectDir, "release");
+    const usage = {
+      input: 1,
+      output: 2,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 3,
+      cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+    };
+    writeFileSync(
+      script,
+      `
+    const fs = require("node:fs");
+    const emit = event => console.log(JSON.stringify(event));
+    const usage = ${JSON.stringify(usage)};
+    emit({ type: "message_start", message: { role: "assistant" } });
+    for (let i = 0; i < 100; i++) {
+      emit({ type: "message_update", usage,
+        assistantMessageEvent: { type: "text_delta", delta: "working " } });
+    }
+    emit({ type: "tool_execution_start", toolCallId: "test", toolName: "bash", args: { command: "test" } });
+    emit({ type: "tool_execution_update", toolCallId: "test", partialResult: { content: [{ type: "text", text: "test output" }] } });
+    const timer = setInterval(() => {
+      if (!fs.existsSync(${JSON.stringify(release)})) return;
+      clearInterval(timer);
+      emit({ type: "tool_execution_end", toolCallId: "test", result: { content: [] }, isError: false });
+      emit({ type: "message_end", message: { role: "assistant", stopReason: "stop", usage,
+        content: [{ type: "text", text: "Finished." }] } });
+    }, 10);
+  `,
+    );
+    const { execute } = captureTool((args) => ({
+      command: process.execPath,
+      args: [script, ...args],
+    }));
+    let updates = 0;
+    let sawLiveOutput = false;
+    try {
+      await withEnv(
+        { PI_CODING_AGENT_DIR: fixture.userDir, PI_SUBAGENT_DEPTH: undefined },
+        async () => {
+          const completed = await execute(
+            "call",
+            { agent: "worker", task: "Run", timeoutMs: 5000 },
+            undefined,
+            (partial) => {
+              updates++;
+              const details = partial.details as { results: Array<{ progress?: ChildProgress }> };
+              if (details.results[0].progress?.activeTools[0]?.output === "test output") {
+                sawLiveOutput = true;
+                writeFileSync(release, "finish");
+              }
+            },
+            fakeContext({ cwd: fixture.projectDir }),
+          );
+          assert.equal(sawLiveOutput, true);
+          assert.equal(completed.content[0].text, "Finished.");
+          assert.deepEqual(completed.usage, usage);
+          assert.ok(updates < 10, "token bursts must not produce one UI update per token");
+          const countAtExit = updates;
+          await new Promise((resolve) => setTimeout(resolve, 1100));
+          assert.equal(updates, countAtExit, "UI timers must stop when the child exits");
+        },
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  },
+);
 
 test("refuses to dispatch from inside a subagent", async () => {
   const execute = captureExecute();
