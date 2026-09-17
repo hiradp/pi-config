@@ -5,7 +5,7 @@ description: Review a pull request, diff, branch, file, or design document only 
 
 # Review
 
-Perform a findings-first technical review grounded in the repository and the exact target under review.
+Perform a technical review grounded in the repository and the exact target under review. For PRs, lead with a brief summary, followed by findings.
 
 ## Delegation boundary
 
@@ -123,16 +123,20 @@ Do not inflate severity to make a review look substantial. It is acceptable to r
 
 Questions and speculative risks are not findings and must not receive a defect severity.
 
-## Report findings first
+## Report format
 
-Begin with confirmed findings, ordered by severity and then by impact. Do not start with praise, process narration, or a summary.
+For every PR review, begin with a `## PR summary` section. In one or two sentences, explain what the PR changes and its intended effect, grounded in the reviewed diff rather than just repeating the PR title. Include this summary in re-reviews too.
+
+Follow the PR summary with confirmed findings, ordered by severity and then by impact. For other review targets, begin with findings. Do not start with praise or process narration.
 
 Use this format:
 
 ```markdown
 ## Findings
 
-### [P1] Concise defect title — `path/to/file.go:123`
+### [P1] Concise defect title
+
+Location: `path/to/file.go:123`
 
 Explain the concrete failing path, why existing protection is insufficient, and the resulting impact. Include a brief direction for correction without writing a full patch unless requested.
 ```
@@ -142,12 +146,15 @@ Explain the concrete failing path, why existing protection is insufficient, and 
 Write the review as GitHub-flavored Markdown that remains usable when copied to GitHub:
 
 - Use actual `##` section headings and `###` finding headings, not plain-text labels such as `Findings` or `Review coverage`.
+- Keep finding headings limited to severity and defect title. Put file/line references or diff links on a separate `Location:` line below the heading, never in the heading.
 - Start headings, paragraphs, and top-level lists at column one. Use blank lines between blocks; indent only nested list content or intentional code blocks.
 - Wrap identifiers, API names, commands, and file references in backticks, including references in explanations and redundant-test entries.
 - For PR reviews, make source references clickable with repository blob URLs pinned to the reviewed commit and exact line anchors. Link the inline-code path rather than leaving a bare `path:line` reference. For example:
 
   ```markdown
-  ### [P2] Concise defect title — [`pkg/controller/example.go:100–103`](https://github.com/OWNER/REPO/blob/HEAD_SHA/pkg/controller/example.go#L100-L103)
+  ### [P2] Concise defect title
+
+  Location: [`pkg/controller/example.go:100–103`](https://github.com/OWNER/REPO/blob/HEAD_SHA/pkg/controller/example.go#L100-L103)
   ```
 
   Substitute the actual repository, reviewed commit SHA, path, and line range; never emit placeholders. Use the base SHA for references to removed code and label them as such.
@@ -165,7 +172,7 @@ Every finding must include:
 
 For a design document, use the exact document line or section anchor and cite implementation locations that disprove or constrain the claim.
 
-After confirmed findings, use separate sections as applicable:
+After findings, use separate sections as applicable:
 
 ```markdown
 ## Questions and assumptions
@@ -207,7 +214,7 @@ Use re-review mode only when the user explicitly says the change was updated, as
 4. Focus detailed review on changed areas and their affected callers, tests, contracts, and generated output.
 5. Perform a bounded regression scan of the complete current diff so a fix in one area does not introduce a new defect elsewhere.
 6. Do not repeat resolved findings as current findings.
-7. Report new or still-open findings first, followed by a concise prior-finding disposition table.
+7. Follow the report format above, keeping the PR summary before new or still-open findings, followed by a concise prior-finding disposition table.
 
 If the previous head or exact prior diff is unavailable, state that limitation and perform the best grounded comparison possible without pretending it is an exact delta review.
 
