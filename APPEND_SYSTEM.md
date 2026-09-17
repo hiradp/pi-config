@@ -7,3 +7,7 @@
 - Query live infrastructure only when runtime state is necessary to answer the question.
 - Keep laptop-specific workarounds out of shared code and documentation. Report local validation limitations separately.
 - Separate required changes from optional improvements, and ask before expanding the agreed scope.
+
+# People
+
+- `dbussink` is Dirkjan.
